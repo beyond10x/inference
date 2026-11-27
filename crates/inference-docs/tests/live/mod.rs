@@ -599,3 +599,235 @@ fn the_lane_is_a_task_outside_the_gate_and_its_directory_is_ignored() {
         ".gitignore: {ignored}"
     );
 }
+
+/// A command that exits other than 0 gives no record, the measure counts as failed and the lane
+/// exits 1; the example without a reader counts as failed too.
+#[test]
+fn a_command_that_fails_gives_no_record_and_the_lane_exits_1() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    for (measure, status) in [("openai-speech-live", 1), ("elevenlabs-live-example", 3)] {
+        executable(
+            &case.dir.join("stubs").join(measure),
+            &format!(
+                "#!/bin/sh\ncat '{}'\nexit {status}\n",
+                fixture(&format!("live/{measure}.out")).display()
+            ),
+        );
+    }
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(
+        lane.status,
+        Some(1),
+        "stdout:\n{}\nstderr:\n{}",
+        lane.stdout,
+        lane.stderr
+    );
+    assert!(case.records("openai-speech-live").is_empty());
+    assert_eq!(case.records("openai-gpt-live").len(), 1);
+    assert!(case.records("elevenlabs-live-example").is_empty());
+    assert_eq!(case.records("elevenlabs-cancel-probe").len(), 1);
+    lane.says("quality-live: openai-speech-live: no record; inference-docs assess exited 1");
+    lane.says("openai-speech-live: its command exited 1");
+    lane.says("quality-live: elevenlabs-live-example: exited 3;");
+    lane.says(
+        "quality-live: 2 records written under .ratchet/records/, 0 measures skipped, 2 failed",
+    );
+}
+
+/// Two runs keep two run directories, and the records of the first stay beside those of the
+/// second.
+#[test]
+fn two_runs_keep_two_run_directories_and_neither_overwrites_the_other() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    for _ in 0..2 {
+        let lane = case.run(Some("1"), Some("voice-0001"));
+        assert_eq!(lane.status, Some(0), "stdout:\n{}", lane.stdout);
+    }
+    let mut runs: Vec<String> = fs::read_dir(case.root.join(".ratchet/runs"))
+        .expect("the runs are kept")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .into_string()
+                .expect("UTF-8")
+        })
+        .collect();
+    runs.sort();
+    assert_eq!(runs.len(), 2, "two run directories: {runs:?}");
+    for (measure, _, read) in MEASURES {
+        for run in &runs {
+            assert!(
+                case.root
+                    .join(format!(".ratchet/runs/{run}/{measure}.out"))
+                    .is_file(),
+                "the output of {measure} in {run} is kept"
+            );
+        }
+        if read {
+            let mut records = case.records(measure);
+            records.sort();
+            let mut expected: Vec<PathBuf> = runs
+                .iter()
+                .map(|run| {
+                    case.root.join(format!(
+                        ".ratchet/records/adapters/{measure}/{run}.evidence.json"
+                    ))
+                })
+                .collect();
+            expected.sort();
+            assert_eq!(records, expected, "one record of {measure} per run");
+        }
+    }
+}
+
+/// A key the Secret Service gives with a line end, spaces and `=` reaches its command as it is
+/// stored, without the line end, and stays out of every output.
+#[test]
+fn a_key_given_with_a_line_end_reaches_its_command_exactly() {
+    const SPACED: &str = "not a=key 0004";
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Missing);
+    executable(
+        &case.dir.join("bin/secret-tool"),
+        &format!(
+            "#!/bin/sh\n[ \"$5\" = '{OPENAI_KEY}' ] || exit 1\nprintf '%s\\n' '{SPACED}'\n"
+        ),
+    );
+    let exact = case.dir.join("exact");
+    executable(
+        &case.dir.join("stubs/openai-speech-live"),
+        &format!(
+            "#!/bin/sh\nif [ \"$OPENAI_API_KEY\" = '{SPACED}' ]; then echo exact; else echo other; fi > '{}'\n\
+             printf 'the key given: %s\\n' \"$OPENAI_API_KEY\" >&2\ncat '{}'\n",
+            exact.display(),
+            fixture("live/openai-speech-live.out").display()
+        ),
+    );
+    let lane = case.run(Some("1"), None);
+    assert_eq!(lane.status, Some(0), "stdout:\n{}", lane.stdout);
+    assert_eq!(
+        fs::read_to_string(&exact).expect("the stub ran").trim(),
+        "exact",
+        "the command sees the key without the line end"
+    );
+    assert!(!lane.stdout.contains(SPACED) && !lane.stderr.contains(SPACED));
+    for (path, text) in case.kept() {
+        assert!(!text.contains(SPACED), "{} holds the key", path.display());
+    }
+}
+
+/// Only `YES=1` lets the lane call anything: a value near it does not.
+#[test]
+fn a_yes_that_is_not_exactly_1_calls_nothing() {
+    for yes in ["10", " 1", "1 ", "01", "true", "Y", "1\n"] {
+        let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+        let lane = case.run(Some(yes), Some("voice-0001"));
+        assert_eq!(lane.status, Some(2), "YES={yes:?}; stdout:\n{}", lane.stdout);
+        case.called_nothing();
+    }
+}
+
+/// Without `secret-tool` on `PATH` every measure is skipped by name and nothing is started.
+#[test]
+fn without_secret_tool_every_measure_is_skipped_by_name() {
+    let case = Case::new(Key::Missing, Key::Missing);
+    let empty = case.dir.join("empty");
+    fs::create_dir_all(&empty).expect("the directory is made");
+    let output = Command::new(env!("CARGO_BIN_EXE_inference-docs"))
+        .arg("live")
+        .arg("--root")
+        .arg(&case.root)
+        .arg("--stubs")
+        .arg(case.dir.join("stubs"))
+        .env("PATH", &empty)
+        .env("YES", "1")
+        .env("ELEVENLABS_VOICE_ID", "voice-0001")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ELEVENLABS_API_KEY")
+        .output()
+        .expect("the lane runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains("quality-live: skipped openai-speech-live, openai-gpt-live: secret-tool cannot be started"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("quality-live: skipped elevenlabs-live-example, elevenlabs-cancel-probe: secret-tool cannot be started"),
+        "{stdout}"
+    );
+    assert_eq!(case.calls(), Vec::<String>::new(), "no stub is started");
+}
+
+/// Whether a command line starts `inference-docs live`, by `cargo run` or by the binary.
+fn starts_the_lane(text: &str) -> bool {
+    let words: Vec<&str> = text
+        .split(|character: char| character.is_whitespace() || matches!(character, '"' | '\''))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.iter().enumerate().any(|(at, word)| {
+        word.ends_with("inference-docs")
+            && words[at + 1..]
+                .iter()
+                .find(|next| !next.starts_with('-'))
+                .is_some_and(|next| *next == "live")
+    })
+}
+
+/// No task that `task check` or a workflow reaches, through its commands or its dependencies,
+/// starts the lane, by its task or by the program, and no workflow starts the program.
+#[test]
+fn no_task_a_workflow_or_check_reaches_starts_the_lane() {
+    let taskfile: serde_norway::Value = serde_norway::from_str(
+        &fs::read_to_string(root().join("Taskfile.yml")).expect("Taskfile.yml is read"),
+    )
+    .expect("Taskfile.yml parses");
+    let tasks = &taskfile["tasks"];
+    assert!(starts_the_lane(
+        &serde_json::to_string(&tasks["quality-live"]["cmds"]).expect("the commands")
+    ));
+    let mut reached = vec!["check".to_owned()];
+    for entry in fs::read_dir(root().join(".github/workflows")).expect("the workflows are read") {
+        let path = entry.expect("an entry").path();
+        let text = fs::read_to_string(&path).expect("a workflow is read");
+        assert!(
+            !starts_the_lane(&text),
+            "{} starts the lane",
+            path.display()
+        );
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for pair in words.windows(2) {
+            if pair[0] == "task" && !pair[1].starts_with('-') {
+                reached.push(pair[1].to_owned());
+            }
+        }
+    }
+    let mut at = 0;
+    while at < reached.len() {
+        let name = reached[at].clone();
+        at += 1;
+        assert_ne!(name, "quality-live", "the lane is reached");
+        let task = &tasks[name.as_str()];
+        let mut next = Vec::new();
+        for command in task["cmds"].as_sequence().into_iter().flatten() {
+            let text = serde_json::to_string(command).expect("a command");
+            assert!(!starts_the_lane(&text), "task {name} starts the lane: {text}");
+            if let Some(called) = command.get("task").and_then(serde_norway::Value::as_str) {
+                next.push(called.to_owned());
+            }
+        }
+        for dependency in task["deps"].as_sequence().into_iter().flatten() {
+            let called = dependency
+                .as_str()
+                .or_else(|| dependency.get("task").and_then(serde_norway::Value::as_str));
+            if let Some(called) = called {
+                next.push(called.to_owned());
+            }
+        }
+        for called in next {
+            if !reached.contains(&called) {
+                reached.push(called);
+            }
+        }
+    }
+}
