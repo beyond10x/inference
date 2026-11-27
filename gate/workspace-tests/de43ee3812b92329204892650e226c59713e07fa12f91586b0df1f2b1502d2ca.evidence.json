@@ -1,0 +1,55 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "workspace-tests",
+    "assessor": "nextest-run@1",
+    "candidate": "743a1a11a486c403cefdf8f30266d52587e43ef1",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "743a1a11a486c403cefdf8f30266d52587e43ef1"
+    },
+    "inputs": {
+      "profile": {
+        "value": "default"
+      }
+    },
+    "completion": "completed",
+    "conditions": {
+      "tools": {
+        "rustc": "1.100.0",
+        "cargo-nextest": "0.9.143"
+      }
+    },
+    "coverage": {
+      "unit": "test",
+      "executed": 3418,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 3418,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "slowest_test",
+        "kind": "sampled",
+        "scope": "run",
+        "value_type": "number",
+        "value": "9.637",
+        "unit": "s",
+        "samples": 1
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46030062693"
+    }
+  },
+  "run": {
+    "started_at": "2026-11-27T16:22:37Z",
+    "ended_at": "2026-11-27T16:23:49Z"
+  }
+}
