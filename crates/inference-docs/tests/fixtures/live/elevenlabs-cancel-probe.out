@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized] target(s) in 0.38s
+     Running tests/tts_cancel_live.rs (target/debug/deps/tts_cancel_live-2c3d4e5f67890123)
+
+running 1 test
+endpoint: wss://api.elevenlabs.io/v1/text-to-speech/voice-0001/multi-stream-input
+P1: 52 characters with flush, no close
+    +   312 ms  context p1     audio   4096 B  final false
+P1 result: first audio Some(312) ms, last audio Some(1500) ms, audio 48000 B (1500 ms), final arrived at 1700 ms, 200 ms after the last audio
+P3: 160 characters with flush, no close
+P3 result: first audio Some(298) ms, last audio Some(4100) ms, 12 audio messages, audio 192000 B (6000 ms); gaps between audio messages in ms [300, 310]; largest Some(310) ms; median Some(305) ms
+P2: 160 characters with flush, close after the first audio message
+P2 result: close at Some(305) ms; before it 16000 B (500 ms); after it 3 audio messages, 32000 B (1000 ms); final true; audio in all 1500 ms against 6000 ms for the whole text (P3), 25%
+P4: "…" with flush, no close, then a close
+P4 result: 0 message(s) without a close in 8 s of quiet
+P4 result: after the close 1 message(s); final 120 ms after the close
+test tts_cancel_probe_prints_the_endpoints_context_behaviour ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.02s
+
