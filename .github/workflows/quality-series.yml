@@ -19,7 +19,7 @@ env:
 
 jobs:
   append:
-    name: append the quality records of main to the series
+    name: append the quality records of main to a commit of the series
     if: >-
       github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.event == 'push'
@@ -27,8 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
       actions: read
+    outputs:
+      appended: ${{ steps.append.outputs.appended }}
+      base: ${{ steps.append.outputs.base }}
+      bundle: ${{ steps.append.outputs.bundle }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -59,11 +63,10 @@ jobs:
           set -eu
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "quality-records-$HEAD_SHA" --dir "$RUNNER_TEMP/records"
 
-      - name: Append the records to the series and push it
+      - name: Append the records to a commit of the series
         id: append
         shell: sh
         env:
-          TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           DOCS: target/debug/inference-docs
@@ -71,59 +74,124 @@ jobs:
           set -eu
           records="$RUNNER_TEMP/records"
           series="$RUNNER_TEMP/series"
-          message="$RUNNER_TEMP/series-message"
+          bundle="$RUNNER_TEMP/series.bundle"
           remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
           run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
-          basic=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-          echo "::add-mask::$basic"
+          git -c init.defaultBranch=series init -q "$series"
+          found=0
+          git -C "$series" ls-remote --exit-code "$remote" "$SERIES_REF" > /dev/null || found=$?
+          if [ "$found" -eq 0 ]; then
+            git -C "$series" fetch -q --no-tags "$remote" "$SERIES_REF"
+            git -C "$series" reset -q --hard FETCH_HEAD
+            base=$(git -C "$series" rev-parse HEAD)
+          elif [ "$found" -eq 2 ]; then
+            base=
+            echo "quality-series: $SERIES_REF does not exist yet; this run starts it"
+          else
+            echo "quality-series: $SERIES_REF of $remote cannot be read" >&2
+            exit 1
+          fi
+          "$DOCS" series-append --from "$records" --series "$series" --root .
+          git -C "$series" add -A
+          if [ -z "$(git -C "$series" status --porcelain)" ]; then
+            echo "quality-series: the series holds every record of the check run $RUN_ID already"
+            echo "appended=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           printf '%s\n' "Append the quality records of the check run $RUN_ID" "" \
             "The records the check run $run wrote for the commit" \
-            "$HEAD_SHA on main, each added once under the digest of its bytes." > "$message"
-
-          forge() {
-            git -C "$series" -c "http.extraheader=AUTHORIZATION: basic $basic" "$@"
-          }
-
-          append() {
-            rm -rf "$series"
-            git -c init.defaultBranch=series init -q "$series"
-            found=0
-            forge ls-remote --exit-code "$remote" "$SERIES_REF" > /dev/null || found=$?
-            if [ "$found" -eq 0 ]; then
-              forge fetch -q --no-tags "$remote" "$SERIES_REF"
-              git -C "$series" checkout -q --detach FETCH_HEAD
-              parent=$(git -C "$series" rev-parse HEAD)
-            elif [ "$found" -eq 2 ]; then
-              parent=
-              echo "quality-series: $SERIES_REF does not exist yet; this run starts it"
-            else
-              echo "quality-series: $SERIES_REF of $remote cannot be read" >&2
-              exit 1
-            fi
-            "$DOCS" series-append --from "$records" --series "$series" --root .
-            git -C "$series" add -A
-            if [ -z "$(git -C "$series" status --porcelain)" ]; then
-              echo "quality-series: the series holds every record of the check run $RUN_ID already"
-              exit 0
-            fi
+            "$HEAD_SHA on main, each added once under the digest of its bytes." |
             git -C "$series" -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -q -F "$message"
-            pushed=0
-            forge push "$remote" "HEAD:$SERIES_REF" || pushed=$?
-          }
+              commit -q -F -
+          if [ -n "$base" ]; then
+            git -C "$series" bundle create -q "$bundle" refs/heads/series "^$base"
+          else
+            git -C "$series" bundle create -q "$bundle" refs/heads/series
+          fi
+          encoded=$(base64 -w0 "$bundle")
+          if [ "${#encoded}" -gt 120000 ]; then
+            echo "quality-series: the commit of the run is ${#encoded} bytes in base64, over the 120000 a job output hands on through the environment" >&2
+            exit 1
+          fi
+          {
+            echo "appended=true"
+            echo "base=$base"
+            echo "bundle=$encoded"
+          } >> "$GITHUB_OUTPUT"
+          echo "quality-series: $(git -C "$series" rev-parse HEAD) on ${base:-no parent} goes to the job push"
 
-          append
-          if [ "$pushed" -ne 0 ]; then
-            moved=$(forge ls-remote "$remote" "$SERIES_REF" | cut -f1)
-            if [ "$moved" = "$parent" ]; then
-              echo "quality-series: the forge refused the push of $SERIES_REF; the series is not changed" >&2
-              exit 1
-            fi
-            echo "quality-series: $SERIES_REF moved to $moved while this run appended; appending once more"
-            append
-            if [ "$pushed" -ne 0 ]; then
-              echo "quality-series: the forge refused the push of $SERIES_REF again; the series is not changed by this run" >&2
-              exit 1
-            fi
+  push:
+    name: push the commit of append to the series
+    needs: append
+    if: needs.append.outputs.appended == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Push the commit of the job append to the series
+        id: push
+        shell: sh
+        env:
+          TOKEN: ${{ github.token }}
+          BASE: ${{ needs.append.outputs.base }}
+          BUNDLE: ${{ needs.append.outputs.bundle }}
+        run: |
+          set -eu
+          token=$TOKEN
+          unset TOKEN
+          basic=$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')
+          token=
+          echo "::add-mask::$basic"
+          remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          repo="$RUNNER_TEMP/push"
+          bundle="$RUNNER_TEMP/series.bundle"
+          changes="$RUNNER_TEMP/series-changes"
+          refuse() {
+            echo "quality-series: $1; nothing is pushed, and the records of this run reach the series when this workflow run is run again" >&2
+            exit 1
+          }
+          printf '%s' "$BUNDLE" | base64 -d > "$bundle"
+          git -c init.defaultBranch=series init -q "$repo"
+          found=0
+          git -C "$repo" ls-remote --exit-code "$remote" "$SERIES_REF" > "$RUNNER_TEMP/series-head" || found=$?
+          if [ "$found" -eq 0 ]; then
+            current=$(cut -f1 "$RUNNER_TEMP/series-head")
+            git -C "$repo" fetch -q --no-tags "$remote" "$SERIES_REF"
+          elif [ "$found" -eq 2 ]; then
+            current=
+          else
+            refuse "$SERIES_REF of $remote cannot be read"
+          fi
+          if [ "$current" != "$BASE" ]; then
+            refuse "$SERIES_REF is at ${current:-nothing}, and the job append appended to ${BASE:-nothing}"
+          fi
+          git -C "$repo" bundle verify -q "$bundle" > /dev/null
+          git -C "$repo" fetch -q "$bundle" refs/heads/series
+          commit=$(git -C "$repo" rev-parse FETCH_HEAD)
+          parents=$(git -C "$repo" rev-list --parents -n 1 "$commit" | cut -s -d' ' -f2-)
+          if [ "$parents" != "$BASE" ]; then
+            refuse "the commit $commit of the job append is not one commit on ${BASE:-nothing}"
+          fi
+          if [ -n "$BASE" ]; then
+            git -C "$repo" diff-tree -r --no-commit-id --name-status "$BASE" "$commit" > "$changes"
+          else
+            git -C "$repo" diff-tree -r --root --no-commit-id --name-status "$commit" > "$changes"
+          fi
+          if [ ! -s "$changes" ]; then
+            refuse "the commit $commit adds no record"
+          fi
+          if cut -f1 "$changes" | grep -v -x A > /dev/null; then
+            refuse "the commit $commit changes or removes a file of the series"
+          fi
+          if cut -f2 "$changes" | grep -v -x -E '[^/]+/[^/]+/[0-9a-f]{64}[.]evidence[.]json' > /dev/null; then
+            refuse "the commit $commit adds a file that is no record of the series"
+          fi
+          if GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" \
+            git -C "$repo" push "$remote" "$commit:$SERIES_REF"; then
+            echo "quality-series: pushed $commit to $SERIES_REF"
+          else
+            refuse "the forge refused the push of $commit to $SERIES_REF"
           fi

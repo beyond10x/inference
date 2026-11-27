@@ -688,25 +688,30 @@ fn series_problems(series: &str, check: &str, others: &[(String, String)]) -> Ve
         .and_then(serde_json::Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if jobs.len() != 1 {
+    let names: Vec<&str> = jobs.keys().map(String::as_str).collect();
+    if names != [APPEND_JOB, PUSH_JOB] {
         problems.push(format!(
-            "{SERIES_WORKFLOW} has {} jobs; the writer is its only job",
-            jobs.len()
+            "{SERIES_WORKFLOW} has the jobs {names:?}, not {APPEND_JOB} and then {PUSH_JOB}"
         ));
     }
-    for (index, (name, job)) in jobs.iter().enumerate() {
+    if workflow.get("env").is_some_and(holds_token) {
+        problems.push("the env of the workflow holds a token".to_owned());
+    }
+    for (name, job) in &jobs {
         let at = format!("the job {name}");
-        if index > 0 {
-            for (_, grant) in writes(&serde_json::json!({"jobs": {name: job}})) {
-                problems.push(format!("{at} of {SERIES_WORKFLOW} grants {grant}"));
+        let wanted = match name.as_str() {
+            APPEND_JOB => serde_json::json!({"contents": "read", "actions": "read"}),
+            PUSH_JOB => serde_json::json!({"contents": "write"}),
+            _ => {
+                for (_, grant) in writes(&serde_json::json!({"jobs": {name: job}})) {
+                    problems.push(format!("{at} of {SERIES_WORKFLOW} grants {grant}"));
+                }
+                continue;
             }
-            continue;
-        }
-        if job.get("permissions")
-            != Some(&serde_json::json!({"contents": "write", "actions": "read"}))
-        {
+        };
+        if job.get("permissions") != Some(&wanted) {
             problems.push(format!(
-                "{at} has the permissions {:?}, not contents: write and actions: read",
+                "{at} has the permissions {:?}, not {wanted}",
                 job.get("permissions")
             ));
         }
@@ -714,37 +719,20 @@ fn series_problems(series: &str, check: &str, others: &[(String, String)]) -> Ve
         if job.get("continue-on-error").is_some() {
             problems.push(format!("{at} continues on error"));
         }
-        match job.get("if").and_then(serde_json::Value::as_str) {
-            None => problems.push(format!("{at} has no condition")),
-            Some(condition) => {
-                for conclusion in ["success", "failure", "cancelled"] {
-                    for event in ["push", "pull_request", "workflow_dispatch"] {
-                        for branch in ["main", "feature"] {
-                            let wanted =
-                                conclusion == "success" && event == "push" && branch == "main";
-                            match series_job_runs(condition, conclusion, event, branch) {
-                                None => {
-                                    problems.push(format!(
-                                        "the condition of {at} cannot be read: {condition:?}"
-                                    ));
-                                }
-                                Some(runs) if runs != wanted => problems.push(format!(
-                                    "{at} runs {runs} for a check run that concluded {conclusion}, of a {event} on {branch}"
-                                )),
-                                Some(_) => continue,
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+        if job.get("env").is_some_and(holds_token) {
+            problems.push(format!("the env of {at} holds a token"));
         }
-        for step in job
+        let steps: Vec<serde_json::Value> = job
             .get("steps")
             .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+            .cloned()
+            .unwrap_or_default();
+        if name == PUSH_JOB {
+            push_job_problems(&at, job, &steps, &mut problems);
+        } else {
+            append_job_problems(&at, job, &steps, &mut problems);
+        }
+        for step in &steps {
             if step.get("continue-on-error").is_some() {
                 problems.push(format!("a step of {at} continues on error"));
             }
@@ -803,6 +791,169 @@ fn series_problems(series: &str, check: &str, others: &[(String, String)]) -> Ve
     problems
 }
 
+/// The job of the series workflow that runs the tree's code: it appends and commits, and holds no
+/// write permission.
+const APPEND_JOB: &str = "append";
+/// The job that pushes what `append` committed: the one writer of the ref, running no code of the
+/// tree.
+const PUSH_JOB: &str = "push";
+/// The head commit of the check run, the tree the job `append` checks out and builds.
+const HEAD_SHA: &str = "${{ github.event.workflow_run.head_sha }}";
+/// What in a script of the job `push` would run code of the tree: a build, a task, the program
+/// built from it, a file of the checked-out tree or a script.
+const TREE_CODE: [&str; 12] = [
+    "cargo",
+    "rustup",
+    "task ",
+    "inference-docs",
+    "DOCS",
+    "GITHUB_WORKSPACE",
+    "./",
+    ".sh",
+    "npm",
+    "npx",
+    "make ",
+    "Taskfile",
+];
+
+/// Whether `value` names the token of the run or a secret.
+fn holds_token(value: &serde_json::Value) -> bool {
+    let text = value.to_string();
+    text.contains("github.token") || text.contains("secrets.")
+}
+
+/// The rules of the job `append`: it runs after a successful check run of a push to `main`
+/// alone, checks out that run's commit without keeping credentials, and gives the token to no
+/// step but the one that downloads the artifact, which runs nothing of the tree.
+fn append_job_problems(
+    at: &str,
+    job: &serde_json::Value,
+    steps: &[serde_json::Value],
+    problems: &mut Vec<String>,
+) {
+    match job.get("if").and_then(serde_json::Value::as_str) {
+        None => problems.push(format!("{at} has no condition")),
+        Some(condition) => {
+            for conclusion in ["success", "failure", "cancelled"] {
+                for event in ["push", "pull_request", "workflow_dispatch"] {
+                    for branch in ["main", "feature"] {
+                        let wanted = conclusion == "success" && event == "push" && branch == "main";
+                        match series_job_runs(condition, conclusion, event, branch) {
+                            None => {
+                                problems.push(format!(
+                                    "the condition of {at} cannot be read: {condition:?}"
+                                ));
+                            }
+                            Some(runs) if runs != wanted => problems.push(format!(
+                                "{at} runs {runs} for a check run that concluded {conclusion}, of a {event} on {branch}"
+                            )),
+                            Some(_) => continue,
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let checkouts: Vec<&serde_json::Value> = steps
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .collect();
+    if checkouts.len() != 1 {
+        problems.push(format!("{at} has {} checkouts, not one", checkouts.len()));
+    }
+    for checkout in checkouts {
+        if checkout.pointer("/with/ref") != Some(&serde_json::json!(HEAD_SHA)) {
+            problems.push(format!(
+                "the checkout of {at} checks out {:?}, not the commit of the check run {HEAD_SHA}",
+                checkout.pointer("/with/ref")
+            ));
+        }
+        if checkout.pointer("/with/persist-credentials") != Some(&serde_json::Value::Bool(false)) {
+            problems.push(format!("the checkout of {at} keeps credentials"));
+        }
+    }
+    for step in steps {
+        if !holds_token(step) {
+            continue;
+        }
+        let id = step.get("id").and_then(serde_json::Value::as_str);
+        let run = step
+            .get("run")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if id != Some("download") || step.get("uses").is_some() {
+            problems.push(format!(
+                "the step {:?} of {at} holds the token",
+                id.or_else(|| step.get("name").and_then(serde_json::Value::as_str))
+            ));
+        } else if let Some(word) = TREE_CODE.iter().find(|word| run.contains(*word)) {
+            problems.push(format!(
+                "the step download of {at} holds the token and runs {word:?}"
+            ));
+        }
+    }
+}
+
+/// The rules of the job `push`: it runs after `append` when that appended, and only `git` and
+/// the runner's tools run in it, nothing of the tree.
+fn push_job_problems(
+    at: &str,
+    job: &serde_json::Value,
+    steps: &[serde_json::Value],
+    problems: &mut Vec<String>,
+) {
+    let needs = job.get("needs");
+    if needs != Some(&serde_json::json!(APPEND_JOB))
+        && needs != Some(&serde_json::json!([APPEND_JOB]))
+    {
+        problems.push(format!("{at} needs {needs:?}, not the job {APPEND_JOB}"));
+    }
+    let wanted = format!("needs.{APPEND_JOB}.outputs.appended == 'true'");
+    if job.get("if").and_then(serde_json::Value::as_str) != Some(wanted.as_str()) {
+        problems.push(format!(
+            "{at} has the condition {:?}, not {wanted:?}",
+            job.get("if")
+        ));
+    }
+    if steps.is_empty() {
+        problems.push(format!("{at} has no steps"));
+    }
+    for step in steps {
+        let label = step
+            .get("id")
+            .or_else(|| step.get("name"))
+            .or_else(|| step.get("uses"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if let Some(uses) = step.get("uses").and_then(serde_json::Value::as_str) {
+            problems.push(format!(
+                "the step {label} of {at} uses {uses}; the job runs no action and no checkout of the tree"
+            ));
+        }
+        if step.get("working-directory").is_some() {
+            problems.push(format!(
+                "the step {label} of {at} runs in a directory of the tree"
+            ));
+        }
+        let run = step
+            .get("run")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        for word in TREE_CODE {
+            if run.contains(word) {
+                problems.push(format!(
+                    "the step {label} of {at} runs {word:?}, code of the tree"
+                ));
+            }
+        }
+    }
+}
+
 #[test]
 fn the_series_is_written_by_one_job_after_a_successful_check_of_a_push_to_main() {
     let (series, others) = split_workflows();
@@ -849,7 +1000,7 @@ fn a_write_permission_on_any_other_job_is_refused() {
         );
         },
     );
-    assert_series_problem("has 2 jobs", |series, _| {
+    assert_series_problem("not append and then push", |series, _| {
         series.push_str(
             "\n  extra:\n    runs-on: ubuntu-latest\n    steps:\n      - run: \"true\"\n",
         );
@@ -881,7 +1032,7 @@ fn a_write_permission_on_any_other_job_is_refused() {
         let docs = other(others, "docs-ux.yml");
         docs.push_str("# refs/ratchet/records\n");
     });
-    assert_series_problem("not contents: write and actions: read", |series, _| {
+    assert_series_problem("the job append has the permissions", |series, _| {
         *series = replaced(series, "      actions: read\n", "      actions: write\n");
     });
     assert_series_problem("not contents: read", |series, _| {
@@ -891,6 +1042,144 @@ fn a_write_permission_on_any_other_job_is_refused() {
             "permissions:\n  contents: write",
         );
     });
+}
+
+/// The job `append` runs the tree's code, so it has no write permission and the token reaches
+/// none of its steps but the download; the write permission is on the job `push` alone.
+#[test]
+fn the_job_that_runs_the_trees_code_holds_no_write_permission_and_no_token() {
+    let append = "    permissions:\n      contents: read\n      actions: read\n";
+    assert_series_problem("the job append has the permissions", |series, _| {
+        *series = replaced(
+            series,
+            append,
+            "    permissions:\n      contents: write\n      actions: read\n",
+        );
+    });
+    assert_series_problem("the job push has the permissions", |series, _| {
+        *series = replaced(
+            series,
+            "    permissions:\n      contents: write\n",
+            "    permissions:\n      contents: write\n      actions: read\n",
+        );
+    });
+    assert_series_problem("the job push has the permissions", |series, _| {
+        *series = replaced(
+            series,
+            "    permissions:\n      contents: write\n",
+            "    permissions:\n      contents: read\n",
+        );
+    });
+    assert_series_problem(
+        "the step Some(\"append\") of the job append holds the token",
+        |series, _| {
+            *series = replaced(
+                series,
+                "          DOCS: target/debug/inference-docs\n",
+                "          DOCS: target/debug/inference-docs\n          TOKEN: ${{ github.token }}\n",
+            );
+        },
+    );
+    assert_series_problem("the env of the job append holds a token", |series, _| {
+        *series = replaced(
+            series,
+            append,
+            &format!("{append}    env:\n      GH_TOKEN: ${{{{ github.token }}}}\n"),
+        );
+    });
+    assert_series_problem("the env of the workflow holds a token", |series, _| {
+        *series = replaced(
+            series,
+            "env:\n  CARGO_INCREMENTAL: \"0\"\n",
+            "env:\n  CARGO_INCREMENTAL: \"0\"\n  TOKEN: ${{ secrets.GITHUB_TOKEN }}\n",
+        );
+    });
+    assert_series_problem(
+        "the step download of the job append holds the token and runs \"cargo\"",
+        |series, _| {
+            *series = replaced(
+                series,
+                "          gh run download",
+                "          cargo run -q -p inference-docs -- history --series . x\n          gh run download",
+            );
+        },
+    );
+}
+
+/// The job `push` runs only `git` and the runner's tools: no action, no checkout of the tree,
+/// no build, no task, no program or script of the tree.
+#[test]
+fn a_step_of_the_push_job_that_runs_the_trees_code_is_refused() {
+    let steps = "    steps:\n      - name: Push the commit of the job append to the series\n";
+    for (expected, step) in [
+        (
+            "uses actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+        ),
+        (
+            "runs \"cargo\"",
+            "      - shell: sh\n        run: cargo build -p inference-docs\n",
+        ),
+        (
+            "runs \"task \"",
+            "      - shell: sh\n        run: task quality-history ASSESSMENT=workspace-tests\n",
+        ),
+        (
+            "runs \".sh\"",
+            "      - shell: sh\n        run: sh tools/push.sh\n",
+        ),
+        (
+            "runs \"GITHUB_WORKSPACE\"",
+            "      - shell: sh\n        run: \"$GITHUB_WORKSPACE/target/debug/inference-docs\"\n",
+        ),
+        (
+            "runs in a directory of the tree",
+            "      - shell: sh\n        working-directory: tools\n        run: \"true\"\n",
+        ),
+    ] {
+        assert_series_problem(expected, |series, _| {
+            *series = replaced(
+                series,
+                steps,
+                &format!(
+                    "    steps:\n{step}      - name: Push the commit of the job append to the series\n"
+                ),
+            );
+        });
+    }
+    assert_series_problem("the job push needs None", |series, _| {
+        *series = replaced(series, "    needs: append\n", "");
+    });
+    assert_series_problem("the job push has the condition", |series, _| {
+        *series = replaced(
+            series,
+            "    if: needs.append.outputs.appended == 'true'\n",
+            "    if: always()\n",
+        );
+    });
+}
+
+/// The job `append` builds and runs the tree of the check run whose records it appends: its
+/// checkout names that run's head commit, not the branch, whose head may have moved on.
+#[test]
+fn the_checkout_is_the_commit_of_the_check_run() {
+    let pinned = "          ref: ${{ github.event.workflow_run.head_sha }}\n";
+    assert_series_problem("not the commit of the check run", |series, _| {
+        *series = replaced(series, pinned, "");
+    });
+    assert_series_problem("not the commit of the check run", |series, _| {
+        *series = replaced(series, pinned, "          ref: main\n");
+    });
+    assert_series_problem(
+        "the checkout of the job append keeps credentials",
+        |series, _| {
+            *series = replaced(
+                series,
+                "          persist-credentials: false\n",
+                "          persist-credentials: true\n",
+            );
+        },
+    );
 }
 
 #[test]
@@ -1150,81 +1439,148 @@ impl Forge {
             .unwrap_or(0)
     }
 
-    /// Runs the steps `download` and `append` of the series workflow for the check run `run` of
-    /// the commit `commit`, with the other writer moving the ref before the first `moves` pushes;
-    /// the exit status of the step that ended the run and what both printed.
+    /// Runs the jobs of the series workflow for the check run `run` of the commit `commit`, with
+    /// the other writer moving the ref before the first `moves` pushes: the steps `download` and
+    /// `append` of the job `append`, then, when its condition holds on the outputs `append`
+    /// wrote, the steps of the job `push`, each job with a runner directory of its own. The exit
+    /// status of the step that ended the run and what every step printed.
     fn run(&self, run: &str, commit: &str, moves: usize) -> (bool, String) {
+        self.run_jobs(
+            run,
+            commit,
+            moves,
+            Path::new(env!("CARGO_BIN_EXE_inference-docs")),
+        )
+    }
+
+    fn run_jobs(&self, run: &str, commit: &str, moves: usize, docs: &Path) -> (bool, String) {
         let _ = fs::remove_file(self.pushes());
         let text = series_workflow();
         let workflow = yaml(&text).unwrap();
-        let steps = workflow
-            .pointer("/jobs/append/steps")
-            .and_then(serde_json::Value::as_array)
-            .expect("the job append has steps")
-            .clone();
-        let runner = tempfile_dir();
-        let path = format!(
-            "{}:{}",
-            self.directory.join("bin").display(),
-            std::env::var("PATH").unwrap()
-        );
-        let values = [
-            ("${{ github.token }}", "a-token".to_owned()),
-            ("${{ github.event.workflow_run.id }}", run.to_owned()),
+        let mut values = vec![
+            ("${{ github.token }}".to_owned(), CASE_TOKEN.to_owned()),
             (
-                "${{ github.event.workflow_run.head_sha }}",
+                "${{ github.event.workflow_run.id }}".to_owned(),
+                run.to_owned(),
+            ),
+            (
+                "${{ github.event.workflow_run.head_sha }}".to_owned(),
                 commit.to_owned(),
             ),
             (
-                "target/debug/inference-docs",
-                env!("CARGO_BIN_EXE_inference-docs").to_owned(),
+                "target/debug/inference-docs".to_owned(),
+                docs.display().to_string(),
             ),
         ];
         let mut printed = String::new();
-        for id in ["download", "append"] {
-            let step = steps
-                .iter()
-                .find(|step| step.get("id").and_then(serde_json::Value::as_str) == Some(id))
-                .unwrap_or_else(|| panic!("the job append has no step {id}"));
-            assert_eq!(
-                step.get("shell").and_then(serde_json::Value::as_str),
-                Some("sh"),
-                "the step {id} runs in sh"
-            );
-            let script = step_script(&text, id);
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(&script)
-                .current_dir(root())
-                .envs(step_env(step, &values))
-                .env("PATH", &path)
-                .env("SERIES_REF", SERIES_REF)
-                .env("RUNNER_TEMP", &runner)
-                .env("GITHUB_WORKSPACE", root())
-                .env(
-                    "GITHUB_SERVER_URL",
-                    format!("file://{}", self.directory.join("forge").display()),
-                )
-                .env("GITHUB_REPOSITORY", "owner/inference")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("CASE_RUN", run)
-                .env("CASE_COMMIT", commit)
-                .env("CASE_ARTIFACT", self.artifact())
-                .env("CASE_GIT", real_git())
-                .env("CASE_PUSHES", self.pushes())
-                .env("CASE_MOVES", moves.to_string())
-                .env("CASE_OTHER", self.other())
-                .env("CASE_REMOTE", format!("file://{}", self.remote().display()))
-                .output()
-                .unwrap();
-            printed.push_str(&String::from_utf8_lossy(&output.stdout));
-            printed.push_str(&String::from_utf8_lossy(&output.stderr));
-            if !output.status.success() {
-                return (false, printed);
+        for job in [APPEND_JOB, PUSH_JOB] {
+            let body = workflow
+                .pointer(&format!("/jobs/{job}"))
+                .unwrap_or_else(|| panic!("the series workflow has no job {job}"));
+            if job == PUSH_JOB {
+                let condition = body.get("if").and_then(serde_json::Value::as_str);
+                assert_eq!(
+                    condition,
+                    Some("needs.append.outputs.appended == 'true'"),
+                    "the case reads the condition of the job push"
+                );
+                let appended = values
+                    .iter()
+                    .find(|(expression, _)| expression == "${{ needs.append.outputs.appended }}")
+                    .map(|(_, value)| value.as_str());
+                if appended != Some("true") {
+                    break;
+                }
+            }
+            let runner = tempfile_dir();
+            let output_file = runner.join("github-output");
+            fs::write(&output_file, "").unwrap();
+            let steps = body
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("the job {job} has steps"));
+            for step in steps {
+                if step.get("uses").is_some()
+                    || step.get("id").and_then(serde_json::Value::as_str).is_none()
+                {
+                    continue;
+                }
+                let id = step.get("id").and_then(serde_json::Value::as_str).unwrap();
+                assert_eq!(
+                    step.get("shell").and_then(serde_json::Value::as_str),
+                    Some("sh"),
+                    "the step {id} runs in sh"
+                );
+                let given: Vec<(&str, String)> = values
+                    .iter()
+                    .map(|(expression, value)| (expression.as_str(), value.clone()))
+                    .collect();
+                let output = Command::new("sh")
+                    .arg("-c")
+                    .arg(step_script(&text, id))
+                    .current_dir(root())
+                    .envs(step_env(step, &given))
+                    .env("PATH", self.path())
+                    .env("SERIES_REF", SERIES_REF)
+                    .env("RUNNER_TEMP", &runner)
+                    .env("GITHUB_OUTPUT", &output_file)
+                    .env("GITHUB_WORKSPACE", root())
+                    .env(
+                        "GITHUB_SERVER_URL",
+                        format!("file://{}", self.directory.join("forge").display()),
+                    )
+                    .env("GITHUB_REPOSITORY", "owner/inference")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("CASE_RUN", run)
+                    .env("CASE_COMMIT", commit)
+                    .env("CASE_ARTIFACT", self.artifact())
+                    .env("CASE_GIT", real_git())
+                    .env("CASE_PUSHES", self.pushes())
+                    .env("CASE_MOVES", moves.to_string())
+                    .env("CASE_OTHER", self.other())
+                    .env("CASE_REMOTE", format!("file://{}", self.remote().display()))
+                    .output()
+                    .unwrap();
+                printed.push_str(&String::from_utf8_lossy(&output.stdout));
+                printed.push_str(&String::from_utf8_lossy(&output.stderr));
+                if !output.status.success() {
+                    return (false, printed);
+                }
+            }
+            if job == APPEND_JOB {
+                let outputs = fs::read_to_string(&output_file).unwrap();
+                for (name, expression) in body
+                    .get("outputs")
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flatten()
+                {
+                    let expression = expression.as_str().unwrap_or_default();
+                    let key = expression
+                        .strip_prefix("${{ steps.append.outputs.")
+                        .and_then(|rest| rest.strip_suffix(" }}"))
+                        .unwrap_or_else(|| panic!("the output {name} is {expression}"));
+                    let value = outputs
+                        .lines()
+                        .rev()
+                        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                        .unwrap_or_default()
+                        .to_owned();
+                    values.push((format!("${{{{ needs.append.outputs.{name} }}}}"), value));
+                }
             }
         }
         (true, printed)
+    }
+
+    /// The path of the steps: the stand-ins first.
+    fn path(&self) -> String {
+        format!(
+            "{}:{}",
+            self.directory.join("bin").display(),
+            std::env::var("PATH").unwrap()
+        )
     }
 
     /// The paths the series holds at `commit` on the forge.
@@ -1400,37 +1756,99 @@ fn a_push_the_forge_refuses_fails_the_job_and_names_the_refusal() {
 }
 
 #[test]
-fn a_push_behind_another_append_is_appended_again_once_and_then_fails() {
+fn a_push_behind_another_writer_fails_the_job_and_a_new_run_of_it_appends_again() {
     let forge = Forge::new(None);
     assert!(forge.run(FIRST_RUN, FIRST_COMMIT, 0).0);
     forge.change_a_record("7.250");
     let (passed, printed) = forge.run(SECOND_RUN, SECOND_COMMIT, 1);
-    assert!(passed, "{printed}");
-    assert_eq!(forge.count_pushes(), 2, "{printed}");
-    let head = forge.head().unwrap();
-    let parent = forge.parents(&head);
+    assert!(
+        !passed,
+        "a push that is no fast-forward fails the job: {printed}"
+    );
     assert_eq!(
-        git_text(&forge.remote(), &["log", "-1", "--format=%s", &parent[0]]),
+        forge.count_pushes(),
+        1,
+        "nothing is pushed again: {printed}"
+    );
+    assert!(
+        printed.contains("nothing is pushed"),
+        "the failure says that nothing is pushed: {printed}"
+    );
+    let moved = forge.head().unwrap();
+    assert_eq!(
+        git_text(&forge.remote(), &["log", "-1", "--format=%s", &moved]),
         "concurrent 1"
     );
+
+    let (passed, printed) = forge.run(SECOND_RUN, SECOND_COMMIT, 0);
+    assert!(passed, "{printed}");
+    let head = forge.head().unwrap();
+    assert_eq!(forge.parents(&head), vec![moved]);
     let tree = forge.tree(&head);
     assert!(tree.contains(&"concurrent-1".to_owned()), "{tree:?}");
     for path in forge.records_in_series() {
         assert!(tree.contains(&path), "{path}: {tree:?}");
     }
+}
 
-    forge.change_a_record("6.500");
-    let (passed, printed) = forge.run("45000000303", "3333333333333333333333333333333333333333", 2);
-    assert!(!passed, "{printed}");
-    assert_eq!(
-        forge.count_pushes(),
-        2,
-        "one append again, no more: {printed}"
+/// A stand-in of the `inference-docs` the job `append` built, which runs the real program and
+/// then does `after` to the series, as a defect of the tree's code could.
+fn docs_that_then(forge: &Forge, after: &str) -> PathBuf {
+    let docs = forge.directory.join("docs-then");
+    fs::write(
+        &docs,
+        format!(
+            "#!/bin/sh\n\
+             '{}' \"$@\" || exit $?\n\
+             while [ $# -gt 0 ]; do [ \"$1\" = --series ] && series=$2; shift; done\n\
+             cd \"$series\" || exit 70\n\
+             {after}\n",
+            env!("CARGO_BIN_EXE_inference-docs")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&docs, fs::Permissions::from_mode(0o755)).unwrap();
+    docs
+}
+
+/// The job `push` runs nothing of the tree and holds what the job `append` hands it to the
+/// rules of the series: one commit on the ref as it was fetched, which only adds records. A
+/// commit in which the program built from the tree did `after` to the series is not pushed.
+#[track_caller]
+fn assert_push_refuses(after: &str) {
+    let forge = Forge::new(None);
+    assert!(forge.run(FIRST_RUN, FIRST_COMMIT, 0).0);
+    let first = forge.head().unwrap();
+    forge.change_a_record("7.250");
+    let docs = docs_that_then(&forge, after);
+    let (passed, printed) = forge.run_jobs(SECOND_RUN, SECOND_COMMIT, 0, &docs);
+    assert!(!passed, "{after}: {printed}");
+    assert!(printed.contains("nothing is pushed"), "{after}: {printed}");
+    assert_eq!(forge.head(), Some(first), "{after}: {printed}");
+    assert_eq!(forge.count_pushes(), 0, "{after}: {printed}");
+}
+
+#[test]
+fn the_push_job_refuses_a_commit_that_changes_a_record() {
+    assert_push_refuses(
+        "for file in gate/workspace-tests/*.evidence.json; do echo changed >> \"$file\"; done",
     );
-    let head = forge.head().unwrap();
-    assert_eq!(
-        git_text(&forge.remote(), &["log", "-1", "--format=%s", &head]),
-        "concurrent 2"
+}
+
+#[test]
+fn the_push_job_refuses_a_commit_that_removes_a_record() {
+    assert_push_refuses("rm gate/workspace-tests/*.evidence.json");
+}
+
+#[test]
+fn the_push_job_refuses_a_commit_that_adds_a_file_that_is_no_record() {
+    assert_push_refuses("echo note > note.txt");
+}
+
+#[test]
+fn the_push_job_refuses_a_commit_that_adds_a_record_not_named_by_its_digest() {
+    assert_push_refuses(
+        "mkdir -p gate/workspace-tests && echo '{}' > gate/workspace-tests/not-a-digest.evidence.json",
     );
 }
 
@@ -1439,71 +1857,10 @@ const CASE_TOKEN: &str = "a-token";
 const CASE_TOKEN_BASIC: &str = "eC1hY2Nlc3MtdG9rZW46YS10b2tlbg==";
 
 impl Forge {
-    /// Runs the steps `download` and `append` like `run`, with `docs` standing in for the
-    /// `inference-docs` the job built from the checked-out tree.
+    /// Runs the jobs like `run`, with `docs` standing in for the `inference-docs` the job
+    /// `append` built from the checked-out tree.
     fn run_with_docs(&self, run: &str, commit: &str, docs: &Path) -> (bool, String) {
-        let _ = fs::remove_file(self.pushes());
-        let text = series_workflow();
-        let workflow = yaml(&text).unwrap();
-        let steps = workflow
-            .pointer("/jobs/append/steps")
-            .and_then(serde_json::Value::as_array)
-            .expect("the job append has steps")
-            .clone();
-        let runner = tempfile_dir();
-        let path = format!(
-            "{}:{}",
-            self.directory.join("bin").display(),
-            std::env::var("PATH").unwrap()
-        );
-        let values = [
-            ("${{ github.token }}", CASE_TOKEN.to_owned()),
-            ("${{ github.event.workflow_run.id }}", run.to_owned()),
-            (
-                "${{ github.event.workflow_run.head_sha }}",
-                commit.to_owned(),
-            ),
-            ("target/debug/inference-docs", docs.display().to_string()),
-        ];
-        let mut printed = String::new();
-        for id in ["download", "append"] {
-            let step = steps
-                .iter()
-                .find(|step| step.get("id").and_then(serde_json::Value::as_str) == Some(id))
-                .unwrap_or_else(|| panic!("the job append has no step {id}"));
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(step_script(&text, id))
-                .current_dir(root())
-                .envs(step_env(step, &values))
-                .env("PATH", &path)
-                .env("SERIES_REF", SERIES_REF)
-                .env("RUNNER_TEMP", &runner)
-                .env("GITHUB_WORKSPACE", root())
-                .env(
-                    "GITHUB_SERVER_URL",
-                    format!("file://{}", self.directory.join("forge").display()),
-                )
-                .env("GITHUB_REPOSITORY", "owner/inference")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("CASE_RUN", run)
-                .env("CASE_COMMIT", commit)
-                .env("CASE_ARTIFACT", self.artifact())
-                .env("CASE_GIT", real_git())
-                .env("CASE_PUSHES", self.pushes())
-                .env("CASE_MOVES", "0")
-                .env("CASE_OTHER", self.other())
-                .env("CASE_REMOTE", format!("file://{}", self.remote().display()))
-                .output()
-                .unwrap();
-            printed.push_str(&String::from_utf8_lossy(&output.stdout));
-            printed.push_str(&String::from_utf8_lossy(&output.stderr));
-            if !output.status.success() {
-                return (false, printed);
-            }
-        }
-        (true, printed)
+        self.run_jobs(run, commit, 0, docs)
     }
 }
 
@@ -1570,8 +1927,13 @@ fn the_job_never_prints_the_token() {
     assert!(passed, "{printed}");
     forge.change_a_record("7.250");
     let (passed, more) = forge.run(SECOND_RUN, SECOND_COMMIT, 1);
-    assert!(passed, "{more}");
-    for line in printed.lines().chain(more.lines()) {
+    assert!(
+        !passed,
+        "a push behind another writer fails the job: {more}"
+    );
+    let (passed, last) = forge.run(SECOND_RUN, SECOND_COMMIT, 0);
+    assert!(passed, "{last}");
+    for line in printed.lines().chain(more.lines()).chain(last.lines()) {
         assert!(!line.contains(CASE_TOKEN), "the token is printed: {line}");
         assert!(
             !line.contains(CASE_TOKEN_BASIC) || line == format!("::add-mask::{CASE_TOKEN_BASIC}"),

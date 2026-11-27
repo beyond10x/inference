@@ -129,25 +129,37 @@ records past it.
 
 The workflow `quality series` (`.github/workflows/quality-series.yml`) keeps the records of every
 check run on `main` as a series on the ref `refs/ratchet/records`, outside the branches of the
-repository. It is the only writer of that ref. It runs when a run of `check` for a push to
-`main` ended with success, one run at a time: its concurrency group never cancels a running
-run, and a run that starts while another runs waits. The forge keeps one waiting run per group:
-a third run replaces the waiting one, whose records are then not appended. Its one job alone
-has `contents: write`, to push the ref, and `actions: read`, to download the artifact; no other
-workflow grants `contents: write`. The job:
+repository. It runs when a run of `check` for a push to `main` ended with success, one run at a
+time: its concurrency group never cancels a running run, and a run that starts while another
+runs waits. The forge keeps one waiting run per group: a third run replaces the waiting one,
+whose records are then not appended. It has two jobs, and each trusts different code:
 
-1. downloads the artifact `quality-records-<commit>` of the check run with `gh run download`;
-2. fetches the ref, or starts the series as a commit with no parent when the ref does not exist;
-3. runs `inference-docs series-append`, which writes each record that is not in the series yet;
-4. commits what it added as `github-actions[bot]`, with a message that names the check run and
-   the commit, and pushes the ref without force.
+- `append` runs the code of the tree. It checks out the commit of the check run, the run's head
+  commit and not the head of `main`, without keeping credentials, and builds `inference-docs`
+  from it. It downloads the artifact `quality-records-<commit>` of the check run with
+  `gh run download`, fetches the ref without a token (the repository is public) or starts the
+  series as a commit with no parent when the ref does not exist, runs
+  `inference-docs series-append`, which writes each record that is not in the series yet, and
+  commits what it added as `github-actions[bot]`, with a message that names the check run and the
+  commit. Its permissions are `contents: read` and `actions: read`; the token reaches only the
+  step that downloads the artifact, never the step that runs the program built from the tree. It
+  hands the commit on as job outputs: a `git bundle` of it in base64, and the commit of the ref it
+  was made on. A bundle over 120000 bytes in base64 fails the job.
+- `push` runs no code of the tree: no checkout, no action, no build, no task, no program or
+  script of the repository, only `git` and the runner's tools. It is the one writer of the
+  series and the only job of any workflow with `contents: write`. It fetches the ref without a
+  token, and pushes nothing when the ref is no longer at the commit `append` worked on, when the
+  bundle is not one commit on that commit, or when that commit changes or removes a file or adds
+  anything but `<plan>/<assessment>/<64 hex digits>.evidence.json`. Otherwise it pushes the
+  commit to the ref without force. The token is in the environment of `git push` alone.
 
-A run whose records are all in the series already pushes nothing. When the push is refused and
-the ref has moved since the fetch, the job fetches it and appends once more; when that push is
-refused too, or the push is refused while the ref has not moved, the job fails and its log names
-the refusal. The ref is unproven on the forge: until the first run of the workflow after its
-merge, no series exists, and that run shows whether the forge lets the job's token create a ref
-outside the branches. A refused push is not worked around.
+A run whose records are all in the series already runs no `push`. A push the forge refuses, also
+because another writer moved the ref in between, fails the job, and its log names the refusal;
+nothing is pushed again. The records of that run reach the series only when its workflow run is
+run again: its job `append` then appends them to the ref as it is at that time. The ref is
+unproven on the forge: until the first run of the workflow after its merge, no series exists,
+and that run shows whether the forge lets the job's token create a ref outside the branches. A
+refused push is not worked around.
 
 The series holds one file per record, `<plan>/<assessment>/<SHA-256 of its bytes>.evidence.json`,
 byte for byte as `task quality-records` wrote it. A record whose bytes are in the series already
@@ -172,8 +184,8 @@ To read the series:
 task quality-history ASSESSMENT=workspace-tests MEASURE=slowest-test
 ```
 
-The task fetches the ref from `origin` into the local ref `refs/ratchet/records`, writes its tree
-to `target/quality-series` and runs `inference-docs history --series target/quality-series
+The task fetches the ref from `origin` into `FETCH_HEAD` alone, so it writes no ref into the git
+directory, writes the tree of `FETCH_HEAD` to `target/quality-series` and runs `inference-docs history --series target/quality-series
 --root . <assessment> [<measurement>]`. Without `MEASURE` it prints every measurement of the
 assessment. It prints one line per record, ordered by the id of the check run its source names,
 which the forge counts up: the run, the revision, and each value as `<measurement>=<value>
@@ -324,22 +336,33 @@ adapters, tests and commands `adapters.rs`, for the program `assess.rs`, and for
   `crates/inference-docs/tests/fixtures/adopt/` and a series in a directory, does not write each
   record byte for byte under the digest of its bytes, adds a record a second time, changes a file
   of the series, adds more than the record whose bytes changed, or writes anything on a refusal
-  of the section "The series of records on `main`" (nine plants in the artifact, a file of other
-  bytes and a link in the series);
-- `inference-docs history` does not list the values of a measurement oldest run first, does not
+  of the section "The series of records on `main`" (nine plants in the artifact and a link there
+  to a record of its own assessment; a file of other bytes, a link at the path of a record and a
+  link where a directory of records stands in the series), or leaves a record of a call whose
+  record could not be written;
+- `inference-docs history` does not list the values of a measurement oldest run first, records
+  of one run by their start and a record whose source names no forge run last, does not
   name the package of each value of a measurement with one value per package, prints a line for
   an assessment with no record, or does not exit 2 for an assessment or a measurement the plan
   files do not declare.
 
 The workflow `quality series` is held by `crates/inference-docs/tests/workflows.rs`, which fails
 when it is triggered otherwise than by a completed run of `check` for a push to `main` that
-succeeded, when a job other than its one job or any other workflow grants `contents: write` or
-a workflow sets no permissions, when its concurrency cancels a run, when it takes an action that
-`check.yml` does not pin by its commit, when it names the ref other than once, or when its steps,
-run with `sh` against a bare repository in a directory and stand-ins of `gh` and `git`, do not
-start the series as a commit with no parent, push a commit for records the series holds, add
-more than one file for one changed record, append once more and only once after another writer
-moved the ref, or exit 0 after a refused push.
+succeeded; when it has other jobs than `append` and then `push`, when `append` has other
+permissions than `contents: read` and `actions: read`, `push` others than `contents: write`, or
+any other job of any workflow grants `contents: write`, or a workflow sets no permissions; when
+a step of `append` other than the download, or the env of a job or of the workflow, holds the
+token; when the checkout of `append` names another commit than the head of the check run or
+keeps credentials; when a step of `push` uses an action, runs in a directory of the tree, or
+runs a build, a task, the program built from the tree or a script; when `push` does not need
+`append` or runs on another condition than its output `appended`; when its concurrency cancels
+a run; when it takes an action that `check.yml` does not pin by its commit; when it names the
+ref other than once; or when its steps, run with `sh` against a bare repository in a directory
+and stand-ins of `gh` and `git`, do not start the series as a commit with no parent, push a
+commit for records the series holds, add more than one file for one changed record, fail
+without pushing again after another writer moved the ref, push a commit that changes, removes
+or adds anything but a record, exit 0 after a refused push or a refusal of `series-append`,
+print the token, or hand the token to the program built from the tree.
 
 One command stands in no `cmds` list of `Taskfile.yml` and names no test or example of a
 package, so the test holds it against nothing. A change of the workflow step that runs it goes
