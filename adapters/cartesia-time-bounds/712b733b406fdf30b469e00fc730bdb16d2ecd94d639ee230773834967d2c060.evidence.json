@@ -1,0 +1,59 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "cartesia-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "24531c00ed59b9800307607e89dd9e95cf339fbd",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "24531c00ed59b9800307607e89dd9e95cf339fbd"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-cartesia"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-cartesia/tests/errors.rs::silence_fails_the_synthesis_as_stalled_within_the_read_timeout",
+          "adapters/inference-cartesia/tests/cancel.rs::a_cancel_does_not_wait_for_the_server"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 2,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 2,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-cartesia/tests/errors.rs::silence_fails_the_synthesis_as_stalled_within_the_read_timeout",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-cartesia/tests/cancel.rs::a_cancel_does_not_wait_for_the_server",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46013435424"
+    }
+  }
+}

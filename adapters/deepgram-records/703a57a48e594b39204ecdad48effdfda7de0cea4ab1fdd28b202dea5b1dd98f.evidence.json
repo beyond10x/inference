@@ -1,0 +1,59 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "deepgram-records",
+    "assessor": "named-tests@1",
+    "candidate": "24531c00ed59b9800307607e89dd9e95cf339fbd",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "24531c00ed59b9800307607e89dd9e95cf339fbd"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-deepgram"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-deepgram/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding",
+          "adapters/inference-deepgram/tests/claims_record.rs::the_voice_agent_record_holds_the_claims_of_the_binding"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 2,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 2,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/claims_record.rs::the_stt_record_holds_the_claims_of_the_binding",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/claims_record.rs::the_voice_agent_record_holds_the_claims_of_the_binding",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/46013435424"
+    }
+  }
+}
