@@ -1433,3 +1433,175 @@ fn a_push_behind_another_append_is_appended_again_once_and_then_fails() {
         "concurrent 2"
     );
 }
+
+/// The token of the cases, and `x-access-token:<token>` in base64, the form the job sends.
+const CASE_TOKEN: &str = "a-token";
+const CASE_TOKEN_BASIC: &str = "eC1hY2Nlc3MtdG9rZW46YS10b2tlbg==";
+
+impl Forge {
+    /// Runs the steps `download` and `append` like `run`, with `docs` standing in for the
+    /// `inference-docs` the job built from the checked-out tree.
+    fn run_with_docs(&self, run: &str, commit: &str, docs: &Path) -> (bool, String) {
+        let _ = fs::remove_file(self.pushes());
+        let text = series_workflow();
+        let workflow = yaml(&text).unwrap();
+        let steps = workflow
+            .pointer("/jobs/append/steps")
+            .and_then(serde_json::Value::as_array)
+            .expect("the job append has steps")
+            .clone();
+        let runner = tempfile_dir();
+        let path = format!(
+            "{}:{}",
+            self.directory.join("bin").display(),
+            std::env::var("PATH").unwrap()
+        );
+        let values = [
+            ("${{ github.token }}", CASE_TOKEN.to_owned()),
+            ("${{ github.event.workflow_run.id }}", run.to_owned()),
+            (
+                "${{ github.event.workflow_run.head_sha }}",
+                commit.to_owned(),
+            ),
+            ("target/debug/inference-docs", docs.display().to_string()),
+        ];
+        let mut printed = String::new();
+        for id in ["download", "append"] {
+            let step = steps
+                .iter()
+                .find(|step| step.get("id").and_then(serde_json::Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("the job append has no step {id}"));
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(step_script(&text, id))
+                .current_dir(root())
+                .envs(step_env(step, &values))
+                .env("PATH", &path)
+                .env("SERIES_REF", SERIES_REF)
+                .env("RUNNER_TEMP", &runner)
+                .env("GITHUB_WORKSPACE", root())
+                .env(
+                    "GITHUB_SERVER_URL",
+                    format!("file://{}", self.directory.join("forge").display()),
+                )
+                .env("GITHUB_REPOSITORY", "owner/inference")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("CASE_RUN", run)
+                .env("CASE_COMMIT", commit)
+                .env("CASE_ARTIFACT", self.artifact())
+                .env("CASE_GIT", real_git())
+                .env("CASE_PUSHES", self.pushes())
+                .env("CASE_MOVES", "0")
+                .env("CASE_OTHER", self.other())
+                .env("CASE_REMOTE", format!("file://{}", self.remote().display()))
+                .output()
+                .unwrap();
+            printed.push_str(&String::from_utf8_lossy(&output.stdout));
+            printed.push_str(&String::from_utf8_lossy(&output.stderr));
+            if !output.status.success() {
+                return (false, printed);
+            }
+        }
+        (true, printed)
+    }
+}
+
+/// The job builds `inference-docs` from the checked-out tree and runs it on the artifact; that
+/// process is the tree's code, and only the push needs the token with `contents: write`. A
+/// stand-in of the binary writes the name of each variable of its environment that holds the
+/// token, in either form, and then runs the real one.
+#[test]
+fn the_binary_built_from_the_checked_out_tree_runs_without_the_write_token() {
+    let forge = Forge::new(None);
+    let witness = forge.directory.join("token-seen");
+    let docs = forge.directory.join("docs");
+    fs::write(
+        &docs,
+        format!(
+            "#!/bin/sh\n\
+             env | grep -e '{CASE_TOKEN}' -e '{CASE_TOKEN_BASIC}' | cut -d= -f1 >> '{}'\n\
+             exec '{}' \"$@\"\n",
+            witness.display(),
+            env!("CARGO_BIN_EXE_inference-docs")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&docs, fs::Permissions::from_mode(0o755)).unwrap();
+    let (passed, printed) = forge.run_with_docs(FIRST_RUN, FIRST_COMMIT, &docs);
+    assert!(passed, "{printed}");
+    assert!(forge.head().is_some(), "the run appended: {printed}");
+    let seen = fs::read_to_string(&witness).expect("the stand-in of the binary ran");
+    assert_eq!(
+        seen.lines().collect::<Vec<_>>(),
+        Vec::<&str>::new(),
+        "the process of the tree's binary holds the write token in these variables"
+    );
+}
+
+/// A refusal of `series-append` fails the job, and nothing is pushed.
+#[test]
+fn a_record_series_append_refuses_fails_the_job_and_pushes_nothing() {
+    let forge = Forge::new(None);
+    fs::write(forge.artifact().join("notes.txt"), b"notes\n").unwrap();
+    let (passed, printed) = forge.run(FIRST_RUN, FIRST_COMMIT, 0);
+    assert!(!passed, "a refused artifact fails the job: {printed}");
+    assert!(printed.contains("notes.txt"), "{printed}");
+    assert_eq!(forge.head(), None, "{printed}");
+    assert_eq!(forge.count_pushes(), 0, "{printed}");
+
+    let forge = Forge::new(None);
+    assert!(forge.run(FIRST_RUN, FIRST_COMMIT, 0).0);
+    let first = forge.head().unwrap();
+    forge.change_a_record("7.250");
+    fs::write(forge.artifact().join("notes.txt"), b"notes\n").unwrap();
+    let (passed, printed) = forge.run(SECOND_RUN, SECOND_COMMIT, 0);
+    assert!(!passed, "a refused artifact fails the job: {printed}");
+    assert_eq!(forge.head(), Some(first), "{printed}");
+    assert_eq!(forge.count_pushes(), 0, "{printed}");
+}
+
+/// The job prints neither the token nor the header it builds from it, except in the line that
+/// masks the header.
+#[test]
+fn the_job_never_prints_the_token() {
+    let forge = Forge::new(None);
+    let (passed, printed) = forge.run(FIRST_RUN, FIRST_COMMIT, 0);
+    assert!(passed, "{printed}");
+    forge.change_a_record("7.250");
+    let (passed, more) = forge.run(SECOND_RUN, SECOND_COMMIT, 1);
+    assert!(passed, "{more}");
+    for line in printed.lines().chain(more.lines()) {
+        assert!(!line.contains(CASE_TOKEN), "the token is printed: {line}");
+        assert!(
+            !line.contains(CASE_TOKEN_BASIC) || line == format!("::add-mask::{CASE_TOKEN_BASIC}"),
+            "the header is printed unmasked: {line}"
+        );
+    }
+}
+
+/// Every checkout of the series workflow leaves no credentials in the tree it checks out.
+#[test]
+fn the_checkout_of_the_series_job_persists_no_credentials() {
+    let workflow = yaml(&series_workflow()).unwrap();
+    let steps = workflow
+        .pointer("/jobs/append/steps")
+        .and_then(serde_json::Value::as_array)
+        .expect("the job append has steps");
+    let checkouts: Vec<&serde_json::Value> = steps
+        .iter()
+        .filter(|step| {
+            step.get("uses")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .collect();
+    assert_eq!(checkouts.len(), 1, "{steps:?}");
+    for step in checkouts {
+        assert_eq!(
+            step.pointer("/with/persist-credentials"),
+            Some(&serde_json::Value::Bool(false)),
+            "{step:?}"
+        );
+    }
+}

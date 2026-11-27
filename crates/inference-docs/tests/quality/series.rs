@@ -581,3 +581,152 @@ fn history_refuses_an_assessment_or_a_measure_the_plan_does_not_declare() {
         assert_eq!(outcome.stdout, "");
     }
 }
+
+/// A link in the series where the directory of a plan or of an assessment stands is refused,
+/// and nothing is written through it.
+#[test]
+fn a_link_in_the_series_where_a_directory_of_records_stands_is_refused() {
+    for link in ["gate", "gate/workspace-tests"] {
+        let case = Case::new();
+        let elsewhere = case.directory.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let at = case.series().join(link);
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &at).unwrap();
+        let before = case.series_files();
+        let outcome = case.append();
+        assert_eq!(
+            outcome.status,
+            Some(1),
+            "{link}: {}{}",
+            outcome.stdout,
+            outcome.stderr
+        );
+        assert!(
+            outcome.stderr.contains(&format!("{}: ", at.display())),
+            "{link}: the refusal names the link: {}",
+            outcome.stderr
+        );
+        assert_eq!(case.series_files(), before, "{link}: nothing is written");
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "{link}: nothing is written through the link"
+        );
+    }
+}
+
+/// A link in the artifact is refused even when it leads to a record of the assessment its name
+/// says.
+#[test]
+fn a_link_in_the_artifact_to_a_record_of_its_own_assessment_is_refused() {
+    let case = Case::new();
+    let path = case.artifact().join(WORKSPACE_TESTS);
+    let outside = case.directory.join("outside.evidence.json");
+    fs::rename(&path, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    let outcome = case.append();
+    assert_eq!(
+        outcome.status,
+        Some(1),
+        "{}{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stderr.contains(&format!("{}: ", path.display())),
+        "{}",
+        outcome.stderr
+    );
+    assert!(case.series_files().is_empty(), "nothing is written");
+}
+
+/// A record that cannot be written ends the call with 3, and the records the call wrote before
+/// it are removed again. The records are written in the order of their paths, so
+/// `gate/workspace-tests` comes last, after every record of `adapters`.
+#[test]
+fn a_record_that_cannot_be_written_leaves_no_record_of_the_call() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    let locked = case.series().join("gate/workspace-tests");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(
+        fs::write(locked.join("probe"), b"").is_err(),
+        "the mode of the directory refuses a new file to this user"
+    );
+    let outcome = case.append();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        outcome.status,
+        Some(3),
+        "{}{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    assert!(
+        outcome.stderr.contains("removed again"),
+        "{}",
+        outcome.stderr
+    );
+    assert_eq!(
+        case.series_files().keys().collect::<Vec<_>>(),
+        Vec::<&String>::new(),
+        "every record the call wrote is removed again"
+    );
+}
+
+/// Two records of one run (a run attempted again) are ordered by their start, and a record
+/// whose source names no forge run comes after every run. The names of the files are chosen
+/// against both orders.
+#[test]
+fn history_orders_records_of_one_run_by_their_start_and_puts_records_of_no_run_last() {
+    let case = Case::new();
+    let fixture = fs::read_to_string(case.artifact().join(WORKSPACE_TESTS)).unwrap();
+    let directory = case.series().join("gate/workspace-tests");
+    fs::create_dir_all(&directory).unwrap();
+    let location = format!("https://github.com/beyond10x/inference/actions/runs/{RUN}");
+    for (file, source, started, value) in [
+        (
+            "b.evidence.json",
+            "https://github.com/beyond10x/inference/actions/runs/45000000100",
+            "2026-11-24T20:00:00Z",
+            "1.000",
+        ),
+        (
+            "a.evidence.json",
+            "https://github.com/beyond10x/inference/actions/runs/45000000100",
+            "2026-11-24T21:00:00Z",
+            "2.000",
+        ),
+        (
+            "0.evidence.json",
+            "target/nextest/default/junit.xml",
+            "2026-11-24T19:00:00Z",
+            "3.000",
+        ),
+        (
+            "c.evidence.json",
+            "https://github.com/beyond10x/inference/actions/runs/45000000050",
+            "2026-11-24T22:00:00Z",
+            "0.500",
+        ),
+    ] {
+        let text = fixture
+            .replace(&location, source)
+            .replace("2026-11-24T20:02:05Z", started)
+            .replace("\"value\": \"8.011\"", &format!("\"value\": \"{value}\""));
+        fs::write(directory.join(file), text).unwrap();
+    }
+    let outcome = case.history(&["workspace-tests", "slowest-test"]);
+    succeeded(&outcome);
+    assert_eq!(
+        outcome.stdout,
+        format!(
+            "45000000050 {COMMIT} slowest-test=0.500 s\n\
+             45000000100 {COMMIT} slowest-test=1.000 s\n\
+             45000000100 {COMMIT} slowest-test=2.000 s\n\
+             target/nextest/default/junit.xml {COMMIT} slowest-test=3.000 s\n"
+        )
+    );
+}
