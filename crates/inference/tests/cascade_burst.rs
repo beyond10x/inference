@@ -11,13 +11,16 @@
 #![cfg(feature = "testing")]
 
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use inference::core::model::ModelId;
 use inference::{Agent, Binding, Stack};
 use inference_testkit::llm::{MockConfiguration, MockGenerator};
 use inference_testkit::stt::ScriptStep;
-use inference_testkit::stt::inference_stt::inference_audio::{AudioEncoding, AudioFormat};
+use inference_testkit::stt::inference_stt::inference_audio::{
+    AudioEncoding, AudioFormat, AudioFrame,
+};
 use inference_testkit::stt::synthetic_audio::{FIXTURE, synthesize};
 use inference_testkit::stt::{Cue, MockConfiguration as SttConfiguration, MockRecogniser};
 use inference_testkit::tts::{MockConfiguration as TtsConfiguration, MockSynthesiser};
@@ -41,9 +44,9 @@ fn script(text: &str) -> Vec<Cue> {
     ]
 }
 
-/// One round: a fresh agent hears the fixture's two utterances at once and answers; whether its
-/// model was asked one generation over each turn's text.
-async fn round() -> Result<(), String> {
+/// One round: a fresh agent hears `fixture`, the fixture's two utterances, at once and answers;
+/// whether its model was asked one generation over each turn's text.
+async fn round(fixture: &[AudioFrame]) -> Result<(), String> {
     let generator = MockGenerator::new(
         MockConfiguration::StreamingOnly,
         ModelId::generate(),
@@ -73,9 +76,9 @@ async fn round() -> Result<(), String> {
         .start()
         .await
         .map_err(|error| format!("the agent does not start: {error}"))?;
-    for frame in synthesize(&FIXTURE) {
+    for frame in fixture {
         agent
-            .send_audio(frame)
+            .send_audio(frame.clone())
             .await
             .map_err(|error| format!("a frame is refused: {error}"))?;
     }
@@ -97,12 +100,14 @@ async fn round() -> Result<(), String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn two_turns_fed_at_once_are_each_answered_over_their_own_text_in_every_round() {
+    let fixture: Arc<[AudioFrame]> = synthesize(&FIXTURE).into();
     let agents: Vec<_> = (0..AGENTS)
         .map(|_| {
-            tokio::spawn(async {
+            let fixture = Arc::clone(&fixture);
+            tokio::spawn(async move {
                 let mut failures = Vec::new();
                 for _ in 0..ROUNDS {
-                    if let Err(failure) = round().await {
+                    if let Err(failure) = round(&fixture).await {
                         failures.push(failure);
                     }
                 }

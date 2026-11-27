@@ -10,12 +10,10 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::{SinkExt, StreamExt};
-use inference_openai::live::{
-    CLOSE_TIMEOUT, LiveClient, LiveClosed, LiveEvent, LiveSender, LiveSessionConfig,
-};
+use inference_openai::live::{LiveClient, LiveClosed, LiveEvent, LiveSender, LiveSessionConfig};
 use inference_openai::{
-    Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
-    RealtimeError,
+    Credential, CredentialError, CredentialFuture, CredentialSource, Deadlines, Endpoint,
+    OPENAI_KEY_NAME, RealtimeError,
 };
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -249,18 +247,35 @@ async fn adversary16_live_stalled_write_recovers_and_the_reunited_halves_close_g
 
 /// The adopter's stopgap bounds each write; one outlives its bound because the peer stopped
 /// draining, and the caller closes from the reunited halves. `LiveClient::close` documents that
-/// "the whole close ... takes at most the longer of the endpoint's read timeout and
-/// CLOSE_TIMEOUT" and fails with `Stalled` when that bound passes, so it returns within
-/// `CLOSE_TIMEOUT` (the read timeout here is 1 s) plus a margin.
+/// "the whole close ... takes at most the longer of the endpoint's read timeout and the
+/// client's close timeout" and fails with `Stalled` when that bound passes, so it returns within
+/// the close timeout plus a margin. The close timeout here is 2 s in place of `CLOSE_TIMEOUT`,
+/// so the test does not wait the 15 s, and it stays the longest of the three as `CLOSE_TIMEOUT`
+/// is by default: the read timeout is 1 s and the write deadline 1.5 s.
 #[tokio::test]
 async fn adversary16_live_close_after_a_stalled_write_keeps_its_documented_bound() {
+    let close_timeout = Duration::from_secs(2);
     let (done_tx, done_rx) = oneshot::channel::<()>();
     let (endpoint, task) = serve(Duration::from_secs(1), move |mut socket| async move {
         accept_start(&mut socket).await;
         let _ = done_rx.await;
     })
     .await;
-    let (mut sender, receiver) = connect(&endpoint).await.into_split();
+    let client = tokio::time::timeout(
+        BOUND,
+        LiveClient::connect_with(
+            &endpoint,
+            Deadlines::default().with_write_timeout(Duration::from_millis(1_500)),
+            &FixedSource,
+            OPENAI_KEY_NAME,
+            &LiveSessionConfig::default(),
+        ),
+    )
+    .await
+    .expect("the start outlived its bound")
+    .expect("the session starts")
+    .with_close_timeout(close_timeout);
+    let (mut sender, receiver) = client.into_split();
     let chunk = vec![0x55_u8; CHUNK];
     let mut written = 0_usize;
     tokio::time::timeout(BOUND, async {
@@ -279,17 +294,24 @@ async fn adversary16_live_close_after_a_stalled_write_keeps_its_documented_bound
     .await
     .expect("no write stayed pending within the bound");
     let client = LiveClient::reunite(sender, receiver).expect("one session's halves");
-    let limit = CLOSE_TIMEOUT + Duration::from_secs(5);
+    assert_eq!(client.close_timeout(), close_timeout);
+    let limit = close_timeout + Duration::from_secs(5);
+    let started = tokio::time::Instant::now();
     let closed = tokio::time::timeout(limit, client.close())
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "close outlived its documented bound: still pending after {limit:?}, CLOSE_TIMEOUT {CLOSE_TIMEOUT:?}, after {written} appends"
+                "close outlived its documented bound: still pending after {limit:?}, the close timeout {close_timeout:?}, after {written} appends"
             )
         });
     assert!(
-        matches!(closed, Err(RealtimeError::Stalled(d)) if d == CLOSE_TIMEOUT),
+        matches!(closed, Err(RealtimeError::Stalled(d)) if d == close_timeout),
         "{closed:?}"
+    );
+    assert!(
+        started.elapsed() >= close_timeout - Duration::from_millis(100),
+        "the close gave up before its bound: {:?}",
+        started.elapsed()
     );
     let _ = done_tx.send(());
     finish(task).await;

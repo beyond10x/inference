@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T05:04:41Z",
+  "actor": "human:operator",
+  "artifact": "story:ticker-tests-hold-on-a-loaded-host",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-elevenlabs -p inference-cartesia --all-features --no-fail-fast",
+    "reference": "VERIFIED: baseline on the base 9f8f013eb on the build node (3 tests run: 1 passed, 2 failed; the 2 are twenty_recognitions_wait_for_the_server_without_blocking_the_runtime and twenty_syntheses_wait_for_the_server_without_blocking_the_runtime of inference-elevenlabs::async_handles) vs treatment at e4d23dcdd on the build node (ten runs, each 246 tests run: 246 passed, 7 skipped; the binary async_handles is part of each run); the five controls of adversary_w2_ticker_blocks hold that a thread held for 200 ms fails the bound"
+  }
+}

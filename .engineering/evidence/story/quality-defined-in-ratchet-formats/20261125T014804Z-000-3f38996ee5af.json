@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T01:48:04Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-defined-in-ratchet-formats",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-docs",
+    "reference": "VERIFIED: baseline with the task docs-check renamed in Taskfile.yml (40 tests run: 39 passed, 1 failed; the failure reads: Taskfile.yml has no task for the command task docs-check) vs treatment at d7c0a5948 inside task test-run (the 58 tests of inference-docs passed, 22 of them of the quality module)"
+  }
+}

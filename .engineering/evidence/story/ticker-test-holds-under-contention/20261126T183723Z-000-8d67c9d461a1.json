@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T18:37:23Z",
+  "actor": "human:operator",
+  "artifact": "story:ticker-test-holds-under-contention",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo nextest run -p inference-elevenlabs -p inference-cartesia -p inference-testkit -E 'binary(adversary_w2_ticker_blocks) | binary(async_handles)' through the shared build pool, 20 runs in a row at d7cb2d48b on main",
+    "reference": "20 of 20 runs exit 0, each 13 tests run: 13 passed, 1 skipped (the loop of yields, ignored with its limit), Summary 2.2 to 2.5 s; each ticker case runs pinned beside 8 spinning threads on its processor. The check run of main at d7cb2d48b passed: https://github.com/beyond10x/inference/actions/runs/45868854898"
+  }
+}

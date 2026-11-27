@@ -1,0 +1,104 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "deepgram-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "abcdef0123456789abcdef0123456789abcdef01",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "abcdef0123456789abcdef0123456789abcdef01"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-deepgram"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-deepgram/tests/audio.rs::a_keep_alive_is_sent_after_silence",
+          "adapters/inference-deepgram/tests/errors.rs::a_server_silent_after_close_stream_stalls_within_the_read_timeout",
+          "adapters/inference-deepgram/tests/security1_boundaries.rs::a_cancel_during_the_opening_handshake_closes_the_connection_within_the_close_bound",
+          "adapters/inference-deepgram/tests/agent_duplex.rs::settings_applied_not_arriving_within_the_deadline_fails_the_open_and_closes",
+          "adapters/inference-deepgram/tests/agent_duplex.rs::a_keepalive_goes_out_after_silence_and_not_while_audio_flows",
+          "adapters/inference-deepgram/src/config.rs::the_agent_endpoint_takes_a_plain_scheme_and_a_checked_url",
+          "adapters/inference-deepgram/tests/agent_duplex.rs::dropping_a_session_mid_reply_closes_the_connection_within_the_close_bound"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 7,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 7,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/audio.rs::a_keep_alive_is_sent_after_silence",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/errors.rs::a_server_silent_after_close_stream_stalls_within_the_read_timeout",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/security1_boundaries.rs::a_cancel_during_the_opening_handshake_closes_the_connection_within_the_close_bound",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/agent_duplex.rs::settings_applied_not_arriving_within_the_deadline_fails_the_open_and_closes",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/agent_duplex.rs::a_keepalive_goes_out_after_silence_and_not_while_audio_flows",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/src/config.rs::the_agent_endpoint_takes_a_plain_scheme_and_a_checked_url",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-deepgram/tests/agent_duplex.rs::dropping_a_session_mid_reply_closes_the_connection_within_the_close_bound",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45000000017"
+    }
+  }
+}

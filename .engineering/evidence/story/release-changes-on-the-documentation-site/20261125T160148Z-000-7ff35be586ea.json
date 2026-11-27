@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T16:01:48Z",
+  "actor": "human:operator",
+  "artifact": "story:release-changes-on-the-documentation-site",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-docs, on the workstation pool, at the tree of 952ae10e1 and with its tests applied to the sources of the commit before",
+    "reference": "VERIFIED: baseline (the tests of the correction on the generator of d67bdfe8f: 81 tests run: 77 passed, 4 failed; failed: a_constant_that_adds_two_durations_is_refused_not_read_as_one_of_them, a_constant_is_read_from_its_own_file_in_the_forms_rustfmt_leaves, a_note_the_sources_of_its_package_do_not_hold_is_refused, the_page_says_what_an_open_a_close_or_a_drop_gives_a_caller) vs treatment (the generator of 952ae10e1 with the adapter reference regenerated: 81 tests run: 81 passed, 0 skipped; generate --check exits 0). Before that, the first red state of the unit on the generator of e18b8036c: 80 tests run: 73 passed, 7 failed (the six tests of the notes and of the error reference, and the drift test of the generated files); then 80 passed at 0ccc257eb. The adversary's second pass ran the generator binary of 0ccc257eb on a copy of the tree with 21 mutants of adapter sources and of the changelog: 20 gave the answer the module doc states, one passed that should not (a constant written as a sum of two durations, read as one of them), which the correction refuses now"
+  }
+}

@@ -22,8 +22,10 @@
 //! Each native provider runs with the session configuration `talk` uses and its key or
 //! credentials as `talk` reads them. The ElevenLabs agent is `ELEVENLABS_AGENT_ID` for a public
 //! agent, or `ELEVENLABS_AGENT_SIGNED_URL` for a private one, and must take and give `pcm_16000`
-//! (`realtime_voice::elevenlabs_config`); it reports no usage. The Deepgram Voice Agent reads its
-//! key from `DEEPGRAM_API_KEY`, runs with the default providers of
+//! (`realtime_voice::elevenlabs_config`); it reports no usage. A signed URL opens one session:
+//! with it the arm measures its first run, and every later run is recorded with the refusal as
+//! its note (`inference_elevenlabs::agent::AgentError::SignedUrlSpent`). The Deepgram Voice
+//! Agent reads its key from `DEEPGRAM_API_KEY`, runs with the default providers of
 //! `inference_deepgram::agent::AgentConfig` in G.711 μ-law at 8 kHz
 //! (`realtime_voice::deepgram_config`), and reports no usage: it bills per minute, which no
 //! message carries. Phonic reads its key from `PHONIC_API_KEY`, runs `phonic-1` in 16-bit PCM at
@@ -656,7 +658,8 @@ fn openai_key() -> Result<Box<dyn CredentialSource>, Box<dyn Error>> {
     )
 }
 
-/// The ElevenLabs agent the environment names: a signed URL, else a public agent id.
+/// The ElevenLabs agent the environment names: a signed URL, with which the model opens one
+/// session, else a public agent id.
 fn elevenlabs_agent() -> Result<ElevenLabsAgent, Box<dyn Error>> {
     if let Ok(url) = std::env::var("ELEVENLABS_AGENT_SIGNED_URL") {
         return Ok(ElevenLabsAgent::signed(

@@ -3,15 +3,19 @@
 //! `spawn_blocking`, each delivering every event while a ticker on the same runtime keeps its
 //! largest gap under 50 ms; and the TTS, STT and duplex conformance procedures run once more
 //! with every event pulled through the async form.
+//!
+//! The ticker is the one of the ElevenLabs binding's tests, `support/ticker.rs` there, included
+//! by path: each gap is counted less the time the runtime's thread was ready to run without a
+//! processor, so a host whose processors are all taken does not fail the bound.
 
 #![cfg(all(feature = "stt", feature = "tts", feature = "duplex"))]
 
-use std::cell::Cell;
-use std::future::Future;
+#[path = "../../../adapters/inference-elevenlabs/tests/support/ticker.rs"]
+mod ticker;
+
 use std::num::{NonZeroU16, NonZeroU32};
-use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use inference_core::envelope::EventEnvelope;
 use inference_core::generation::{Generation, StartGeneration};
@@ -45,50 +49,12 @@ use inference_tts::{
 };
 
 const SESSIONS: usize = 20;
-const TICK: Duration = Duration::from_millis(10);
-const GAP_BOUND: Duration = Duration::from_millis(50);
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("a current-thread runtime")
-}
-
-/// Runs `sessions` on a current-thread runtime beside a ticker that ticks every [`TICK`] until
-/// they are done; returns what they returned and the ticker's largest gap.
-fn with_ticker<F, T>(sessions: Vec<F>) -> (Vec<T>, Duration)
-where
-    F: Future<Output = T> + 'static,
-    T: 'static,
-{
-    let runtime = runtime();
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
-        let done = Rc::new(Cell::new(false));
-        let ticker = {
-            let done = Rc::clone(&done);
-            tokio::task::spawn_local(async move {
-                let mut largest = Duration::ZERO;
-                let mut last = Instant::now();
-                while !done.get() {
-                    tokio::time::sleep(TICK).await;
-                    let now = Instant::now();
-                    largest = largest.max(now - last);
-                    last = now;
-                }
-                largest
-            })
-        };
-        let running: Vec<_> = sessions.into_iter().map(tokio::task::spawn_local).collect();
-        let mut results = Vec::new();
-        for session in running {
-            results.push(session.await.expect("a session task ends without a panic"));
-        }
-        done.set(true);
-        let largest = ticker.await.expect("the ticker ends without a panic");
-        (results, largest)
-    })
 }
 
 fn format() -> AudioFormat {
@@ -156,7 +122,7 @@ async fn synthesise() -> Vec<SynthesisEvent> {
 
 #[test]
 fn twenty_syntheses_deliver_every_event_through_the_async_form_and_the_ticker_keeps_time() {
-    let (results, largest) = with_ticker((0..SESSIONS).map(|_| synthesise()).collect());
+    let (results, largest) = ticker::with_ticker((0..SESSIONS).map(|_| synthesise()).collect());
     assert_eq!(results.len(), SESSIONS);
     for events in &results {
         assert!(
@@ -169,7 +135,10 @@ fn twenty_syntheses_deliver_every_event_through_the_async_form_and_the_ticker_ke
             .count();
         assert_eq!(audio, 7, "one frame per word of the two segments");
     }
-    assert!(largest < GAP_BOUND, "the ticker's largest gap {largest:?}");
+    assert!(
+        largest < ticker::GAP_BOUND,
+        "the ticker's largest gap {largest:?}"
+    );
 }
 
 /// One recognition of the mock's script through the async form: every event until the usage
@@ -201,7 +170,7 @@ async fn recognise() -> Vec<EventEnvelope<TranscriptEvent>> {
 
 #[test]
 fn twenty_recognitions_deliver_every_event_through_the_async_form_and_the_ticker_keeps_time() {
-    let (results, largest) = with_ticker((0..SESSIONS).map(|_| recognise()).collect());
+    let (results, largest) = ticker::with_ticker((0..SESSIONS).map(|_| recognise()).collect());
     assert_eq!(results.len(), SESSIONS);
     for events in &results {
         assert!(
@@ -218,7 +187,10 @@ fn twenty_recognitions_deliver_every_event_through_the_async_form_and_the_ticker
             "a span is committed: {events:?}"
         );
     }
-    assert!(largest < GAP_BOUND, "the ticker's largest gap {largest:?}");
+    assert!(
+        largest < ticker::GAP_BOUND,
+        "the ticker's largest gap {largest:?}"
+    );
 }
 
 fn session_config(turn_detection: TurnDetection, auto: bool) -> SessionConfig {
@@ -275,7 +247,7 @@ async fn converse() -> Vec<SessionEvent> {
 
 #[test]
 fn twenty_speech_sessions_deliver_every_event_through_the_async_form_and_the_ticker_keeps_time() {
-    let (results, largest) = with_ticker((0..SESSIONS).map(|_| converse()).collect());
+    let (results, largest) = ticker::with_ticker((0..SESSIONS).map(|_| converse()).collect());
     assert_eq!(results.len(), SESSIONS);
     for events in &results {
         assert!(
@@ -297,7 +269,10 @@ fn twenty_speech_sessions_deliver_every_event_through_the_async_form_and_the_tic
             "the async form ends after the close: {events:?}"
         );
     }
-    assert!(largest < GAP_BOUND, "the ticker's largest gap {largest:?}");
+    assert!(
+        largest < ticker::GAP_BOUND,
+        "the ticker's largest gap {largest:?}"
+    );
 }
 
 /// A synthesiser whose handles yield each event by blocking on the async form of the wrapped

@@ -146,7 +146,7 @@ fn config(turn_detection: TurnDetection, auto_response: bool) -> SessionConfig {
 }
 
 #[test]
-#[ignore = "calls the hosted Realtime API; needs the live feature and a key"]
+#[ignore = "calls the hosted Realtime API and is billed; needs the live feature and a key"]
 fn one_audio_in_audio_out_session_through_the_contract() {
     let mut model = model();
     let mut session = model
@@ -204,7 +204,7 @@ fn one_audio_in_audio_out_session_through_the_contract() {
 }
 
 #[test]
-#[ignore = "calls the hosted Realtime API; needs the live feature and a key"]
+#[ignore = "calls the hosted Realtime API and is billed; needs the live feature and a key"]
 fn native_duplex_evidence_of_the_hosted_model() {
     let opening = frames(SPEECH, 0, Duration::from_millis(1_500));
     let start = opening.last().map_or(0, |frame| {

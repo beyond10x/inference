@@ -1,0 +1,68 @@
+{
+  "format": "ratchet-evidence/1",
+  "evidence": {
+    "project": "inference",
+    "assessment": "phonic-time-bounds",
+    "assessor": "named-tests@1",
+    "candidate": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad",
+    "target": {
+      "kind": "revision",
+      "class": "ci",
+      "selection": "candidate",
+      "revision": "59b8f4a858ab9c4eef94bc21de8e7bb85f90ddad"
+    },
+    "inputs": {
+      "package": {
+        "value": "inference-phonic"
+      },
+      "tests": {
+        "value": [
+          "adapters/inference-phonic/tests/duplex.rs::no_ready_within_the_deadline_fails_the_open_and_closes_the_connection",
+          "adapters/inference-phonic/tests/duplex.rs::a_quiet_server_that_answers_pings_stays_open_and_a_deaf_one_stalls",
+          "adapters/inference-phonic/tests/duplex.rs::dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound"
+        ]
+      }
+    },
+    "completion": "completed",
+    "conditions": {},
+    "coverage": {
+      "unit": "test",
+      "executed": 3,
+      "skipped": 0,
+      "not_run": 0,
+      "unsupported": 0,
+      "passed": 3,
+      "failed": 0
+    },
+    "results": [
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-phonic/tests/duplex.rs::no_ready_within_the_deadline_fails_the_open_and_closes_the_connection",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-phonic/tests/duplex.rs::a_quiet_server_that_answers_pings_stays_open_and_a_deaf_one_stalls",
+        "value_type": "assertion",
+        "holds": true
+      },
+      {
+        "output": "passed",
+        "kind": "exact",
+        "scope": "test",
+        "item": "adapters/inference-phonic/tests/duplex.rs::dropping_a_session_mid_stream_closes_the_connection_within_the_close_bound",
+        "value_type": "assertion",
+        "holds": true
+      }
+    ],
+    "source": {
+      "kind": "forge_runs",
+      "location": "https://github.com/beyond10x/inference/actions/runs/45474241015"
+    }
+  }
+}

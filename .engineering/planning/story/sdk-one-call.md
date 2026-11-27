@@ -10,8 +10,6 @@ relations:
 - depends_on: story:sdk-agent
 scope:
 - confidence: inferred
-  path: crates/inference-docs/src/status.rs
-- confidence: inferred
   path: crates/inference/src/agent.rs
 - confidence: cited
   path: crates/inference/src/chat.rs
@@ -29,10 +27,10 @@ scope:
   path: crates/inference/src/voice.rs
 - confidence: cited
   path: crates/inference/tests/oneshot.rs
-revision: 23
+revision: 24
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 12}
-- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:timo", revision: 13}
+- {from: "draft", to: "proposed", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 12}
+- {from: "proposed", to: "active", at: "2026-11-24T13:08:07Z", actor: "human:operator", revision: 13}
 ---
 ## Context
 

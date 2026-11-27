@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T06:06:35Z",
+  "actor": "human:operator",
+  "artifact": "story:release-check-for-added-ignores",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo nextest run -p inference-docs through the shared build pool, the cases before the change, then with it",
+    "reference": "VERIFIED: baseline vs treatment, twice. First build (5d6e1adea): its cases against a stub check, 4 tests run: 0 passed, 4 failed; the real check on the unchanged tree refused 6 reasons (4 tests run: 3 passed, 1 failed); with the rewrites, 127 passed. Correction 1 (3b2a61f9d): the adversary's ten cases on 5d6e1adea, 137 tests run: 128 passed, 9 failed; with the correction, 140 tests run: 140 passed. The tree test reads 73 ignores in 0.322 s. cargo fmt --check and clippy -D warnings of the package exit 0"
+  }
+}

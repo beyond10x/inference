@@ -22,7 +22,8 @@ use inference_duplex::{
     Unsupported, UsageRecorded,
 };
 use inference_openai::duplex::{
-    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, wire_format,
+    OpenAiRealtime, OpenAiRealtimeSession, capabilities, claims, default_session_config,
+    wire_format,
 };
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Eagerness, Endpoint,
@@ -235,6 +236,38 @@ fn config(turn_detection: TurnDetection, auto: bool) -> SessionConfig {
         tools: Vec::new(),
         idle_limit: Duration::from_secs(5),
     }
+}
+
+/// The message a script sends after its last: an `error` event. The binding counts it on the
+/// session, records nothing for it and ends nothing by it.
+fn script_end() -> Value {
+    json!({"type": "error", "event_id": "event_end", "error": {
+        "type": "invalid_request_error", "message": "the script ended"
+    }})
+}
+
+/// Events until the binding read [`script_end`] and has none left: every message of the script
+/// was read then, and the server sends no more before the close. Without that message, until
+/// twenty waits in a row deliver nothing.
+///
+/// [`script_end`] is the last message of a script. A message the server sends after it is not
+/// read here: the read ends within one wait of 100 ms after it, where the read of two seconds
+/// went on. `adversary2_w1_script_end.rs` holds that.
+fn to_the_script_end(session: &mut OpenAiRealtimeSession) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    let mut idle = 0;
+    while idle < 20 {
+        let ended = session.server_error_count() > 0;
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
+            Some(event) => {
+                idle = 0;
+                events.push(event);
+            }
+            None if ended => break,
+            None => idle += 1,
+        }
+    }
+    events
 }
 
 /// Events until one `stop` accepts, or until twenty waits in a row deliver nothing.
@@ -617,6 +650,7 @@ fn the_providers_interruption_cancels_the_response_and_the_next_has_a_new_id() {
         send(&mut socket, response_created("resp_2")).await;
         send(&mut socket, transcript_delta("resp_2", "item_o2", "Sure")).await;
         send(&mut socket, response_done("resp_2", "completed")).await;
+        send(&mut socket, script_end()).await;
         let _ = socket.next().await;
     });
     let mut model = server.model();
@@ -624,7 +658,7 @@ fn the_providers_interruption_cancels_the_response_and_the_next_has_a_new_id() {
         .open(config(TurnDetection::ServerVad, true))
         .expect("the session opens");
     let mut events = until(&mut session, any_completed);
-    events.extend(until(&mut session, any_completed));
+    events.extend(to_the_script_end(&mut session));
     session.close().expect("open");
     server.finish();
 
@@ -720,6 +754,7 @@ fn barge_in_decided_by_the_caller_cancels_and_truncates_at_the_heard_sample() {
             json!({"type": "conversation.item.truncated", "event_id": "event_tr", "item_id": "item_o1", "content_index": 0, "audio_end_ms": 5}),
         )
         .await;
+        send(&mut socket, script_end()).await;
         let _ = socket.next().await;
     });
     let mut model = server.model();
@@ -735,7 +770,7 @@ fn barge_in_decided_by_the_caller_cancels_and_truncates_at_the_heard_sample() {
     session
         .truncate_output(response, heard)
         .expect("within the emitted audio");
-    let rest = until(&mut session, |_| false);
+    let rest = to_the_script_end(&mut session);
     session.close().expect("open");
     server.finish();
 
@@ -902,6 +937,46 @@ fn a_silent_provider_fails_the_session_as_stalled_at_the_bound() {
         "{events:#?}"
     );
     assert!(waited >= Duration::from_millis(400), "{waited:?}");
+}
+
+/// The idle limit of the session configuration a caller gets from
+/// `duplex::default_session_config()`, and the two deadlines of a model built with
+/// `OpenAiRealtime::new(..)` and given none, each compared with its number written out: a
+/// changed default fails here, and so does a model that starts with other deadlines than
+/// `Deadlines::default()`. The idle limit has no constant. Outside the source the numbers are
+/// stated in `quality/adapters.md`, entry `openai-time-bounds/held`.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let model = OpenAiRealtime::new(
+        Endpoint::new("gpt-realtime-2.1"),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    );
+    let defaults = [
+        (
+            "duplex::default_session_config().idle_limit",
+            default_session_config().idle_limit,
+            Duration::from_secs(30),
+        ),
+        (
+            "OpenAiRealtime::new(..).connect_timeout()",
+            model.connect_timeout(),
+            Duration::from_secs(10),
+        ),
+        (
+            "OpenAiRealtime::new(..).write_timeout()",
+            model.write_timeout(),
+            Duration::from_secs(10),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
+    );
 }
 
 #[test]

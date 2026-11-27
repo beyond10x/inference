@@ -13,8 +13,8 @@ use inference_audio::{AudioEncoding, AudioFormat};
 use inference_duplex::{
     NativeSpeechModel, SessionConfig, SessionEvent, SpeechSessionHandle, TurnDetection, TurnTuning,
 };
-use inference_openai::live::{CLOSE_TIMEOUT, LIVE_MODEL};
-use inference_openai::live_duplex::OpenAiLive;
+use inference_openai::live::LIVE_MODEL;
+use inference_openai::live_duplex::{OpenAiLive, OpenAiLiveSession};
 use inference_openai::{
     Credential, CredentialError, CredentialFuture, CredentialSource, Endpoint, OPENAI_KEY_NAME,
 };
@@ -178,40 +178,22 @@ fn config() -> SessionConfig {
     }
 }
 
-fn until(
-    session: &mut impl SpeechSessionHandle,
-    stop: impl Fn(&SessionEvent) -> bool,
-) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    let mut idle = 0;
-    while idle < 20 {
-        match session.next_event(WAIT) {
-            Some(event) => {
-                idle = 0;
-                let done = stop(&event);
-                events.push(event);
-                if done {
-                    break;
-                }
-            }
-            None => idle += 1,
-        }
-    }
-    events
-}
-
 /// The close of a GPT-Live session ends whatever the server sends. A server that answers
 /// `session.close` with undecodable text every 100 ms and never `session.closed` holds
 /// `LiveClient::close`, and with it `SpeechSessionHandle::close`, for as long as it keeps
 /// sending: the read timeout is per read, and each message resets it. A silent server is given
-/// up after `CLOSE_TIMEOUT`; the close is given that bound and five seconds more here.
+/// up after the model's close timeout; the close is given that bound and five seconds more here.
+/// The close timeout is 2 s in place of `CLOSE_TIMEOUT`, over a read timeout of 1 s, so the test
+/// does not wait the 15 s; the server sends for three times as long as the close is given.
 #[test]
 fn a_close_answered_only_by_undecodable_messages_returns() {
-    let server = Server::start(|mut socket| async move {
+    let close_timeout = Duration::from_secs(2);
+    let bound = close_timeout + Duration::from_secs(5);
+    let server = Server::start(move |mut socket| async move {
         accept_start(&mut socket).await;
         let close = receive(&mut socket).await;
         assert_eq!(close["type"], "session.close");
-        let until = tokio::time::Instant::now() + CLOSE_TIMEOUT * 3;
+        let until = tokio::time::Instant::now() + bound * 3;
         while tokio::time::Instant::now() < until {
             if socket.send(Message::text("not json")).await.is_err() {
                 return;
@@ -219,18 +201,53 @@ fn a_close_answered_only_by_undecodable_messages_returns() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    let mut model = server.model();
+    let mut model = OpenAiLive::new(
+        server
+            .endpoint
+            .clone()
+            .with_read_timeout(Duration::from_secs(1)),
+        Box::new(FixedSource),
+        OPENAI_KEY_NAME,
+    )
+    .with_close_timeout(close_timeout);
     let mut session = model.open(config()).expect("the session opens");
     let (done, returned) = mpsc::channel();
     std::thread::spawn(move || {
         let closed = session.close();
         let _ = done.send(closed.is_ok());
     });
-    let bound = CLOSE_TIMEOUT + Duration::from_secs(5);
     assert!(
         returned.recv_timeout(bound).is_ok(),
         "close() had not returned after {bound:?} of undecodable messages"
     );
+}
+
+/// Events until `read` says the binding read the last message of the script and no event is left:
+/// every message of the script was read then, and the server sends no more before the close.
+/// While `read` does not say so, until twenty waits in a row deliver nothing.
+///
+/// The message `read` waits for is the last of the script. A message the server sends after it
+/// and before the close is not read here: the read ends within one wait of 100 ms after it,
+/// where the read of two seconds went on. `adversary2_w1_script_end.rs` holds that for the same
+/// read over the Realtime binding.
+fn until_read(
+    session: &mut OpenAiLiveSession,
+    read: impl Fn(&OpenAiLiveSession) -> bool,
+) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    let mut idle = 0;
+    while idle < 20 {
+        let ended = read(session);
+        match session.next_event(if ended { Duration::ZERO } else { WAIT }) {
+            Some(event) => {
+                idle = 0;
+                events.push(event);
+            }
+            None if ended => break,
+            None => idle += 1,
+        }
+    }
+    events
 }
 
 /// The usage a backend `response.completed` reports is billable, and the binding needs nothing
@@ -258,7 +275,7 @@ fn backend_usage_of_a_completed_event_without_an_id_is_counted() {
     });
     let mut model = server.model();
     let mut session = model.open(config()).expect("the session opens");
-    let events = until(&mut session, |_| false);
+    let events = until_read(&mut session, |session| session.backend_usage().len() >= 2);
     assert_eq!(
         session.backend_usage().len(),
         2,

@@ -4,7 +4,8 @@
 //! `generate` writes six files:
 //!
 //! - `website/docs/reference/crates.md`, from `cargo metadata --no-deps`;
-//! - `website/docs/reference/adapters.md`, from the adapters' capability and claims records;
+//! - `website/docs/reference/adapters.md`, from the adapters' capability and claims records, and
+//!   the notes of `adapters::NOTES`, each held to the sources of its adapter;
 //! - `website/docs/reference/errors.md`, from the error kinds of the compiled ESS specification,
 //!   each of which the code must name;
 //! - `website/data/status.json` (`b10x-status/1`) and `website/docs/status.mdx`, from
@@ -18,8 +19,15 @@
 //! package has.
 //!
 //! `provenance` writes `.well-known/b10x-site.json` and `.nojekyll` into a built site.
+//!
+//! `assess` writes the `ratchet-evidence/1` record of one assessment of `quality/` from a file a
+//! run left behind ([`assess`]). `junit-assessments` prints the assessments whose record is read
+//! from the JUnit report of `task test-run`, the list `task quality-records` calls `assess` for.
+//! `adopt-records` copies the records of a check run on `main`, downloaded by the caller, into
+//! `quality/records/` after it has checked all of them ([`assess::adopt`]).
 
 mod adapters;
+mod assess;
 mod crates;
 mod errors;
 mod pages;
@@ -35,7 +43,8 @@ use std::{
 
 use clap::{Parser, Subcommand};
 
-/// Every failure is reported as one message and exit code 1.
+/// Every failure of `generate` and `provenance` is reported as one message and exit code 1;
+/// `assess` has exit codes of its own.
 type Result<T> = std::result::Result<T, String>;
 
 /// The first line of every generated page's front matter.
@@ -78,6 +87,24 @@ enum Action {
         #[arg(long)]
         commit: String,
     },
+    /// Write the `ratchet-evidence/1` record of one assessment of `quality/` from a file a run
+    /// left behind: the JUnit report of cargo-nextest, or the captured output of a command. Runs
+    /// no measure. Exit 0 with the record at `--out`, 1 when the file does not hold what the
+    /// assessment reads, 2 for a wrong call, 3 when a plan file, a declaration or a pin cannot be
+    /// read.
+    Assess(assess::Arguments),
+    /// Print the assessments `task quality-records` writes a record for: one line
+    /// `<plan> <assessment> <target kind>` per assessment of the plan files whose assessor reads
+    /// the JUnit report of cargo-nextest and whose observation runs `task test-run`. Exit 3 when
+    /// a plan file cannot be read.
+    JunitAssessments(assess::ListArguments),
+    /// Adopt the records of a check run on `main` into `quality/records/`, byte for byte: from the
+    /// directory its artifact `quality-records-<commit>` was downloaded to, and the saved output
+    /// of `gh run view <id> --json databaseId,headBranch,headSha,event,workflowName`. Downloads
+    /// nothing. Exit 0 with every record written, 1 when a record or the run is refused, 2 for a
+    /// wrong call, 3 when a plan file cannot be read or a record cannot be written; it writes all
+    /// records or none.
+    AdoptRecords(assess::adopt::Arguments),
 }
 
 /// Generated files keyed by their path relative to the repository root.
@@ -175,6 +202,9 @@ fn main() -> ExitCode {
         Action::Generate { check, root } => generate(&root, check),
         Action::Provenance { site, commit } => write_provenance(&site, &commit)
             .map(|()| println!("{}: bound to {commit}", site.display())),
+        Action::Assess(arguments) => return assess::run(&arguments),
+        Action::JunitAssessments(arguments) => return assess::list(&arguments),
+        Action::AdoptRecords(arguments) => return assess::adopt::run(&arguments),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

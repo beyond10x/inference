@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sentence-clips-with-durations
 kind: story
-status: draft
+status: active
 title: Synthesis returns one clip per sentence with its duration
 tags:
 - from-consumer-gap
@@ -10,7 +10,10 @@ relations:
 - decomposes: epic:sdk
 - serves: vision:inference
 - depends_on: story:sdk-one-call
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-24T13:16:54Z", actor: "human:operator", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-24T13:16:54Z", actor: "human:operator", revision: 3}
 ---
 ## Context
 

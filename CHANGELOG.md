@@ -2,6 +2,143 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference-elevenlabs` (feature `duplex`): a model built with `ElevenLabsAgent::signed` gives its
+  signed URL up to the first open that gets past its configuration and its runtime, whatever happens
+  next: the session opened, no request could be built from the URL, the open was cancelled before
+  the handshake was first polled, the connection could not be made, the server refused the upgrade,
+  the handshake timed out or was cancelled, or the agent's formats were not the session's. Every
+  later open that gets past its configuration and its runtime fails as the new variant
+  `agent::AgentError::SignedUrlSpent` (`SessionFailureKind::Rejected`) before anything connects, so
+  a failed connect and a format refusal spend the URL too: build a model with a new signed URL for
+  the next open. Only an open refused for its configuration, or whose runtime could not be built,
+  leaves the URL with the model. A public agent's model is unchanged.
+
+### Added
+
+- `inference-docs` (not published): `inference-docs adopt-records` and `task quality-adopt RUN=…
+  DIR=… RUN_JSON=…` copy the records of a check run on `main`, downloaded by the caller from its
+  artifact `quality-records-<commit>` and described by the saved output of `gh run view <id> --json
+  databaseId,headBranch,headSha,event,workflowName`, into `quality/records/` byte for byte. They
+  download nothing; refuse a run that is not a push to `main` of the workflow `check`, a record of
+  another run or commit, a missing or extra record, a record of another project, assessor or class
+  than `ci`, a target `assess` would not write, a record holding a key twice and a record the record
+  rules of the quality documents refuse, naming each file and reason; and write all records or
+  none. The committed records are not adopted yet.
+- `inference-docs` (not published): a test of the documentation crate reads every `#[ignore]`
+  (also a `#[cfg_attr(…)]` over several lines) of the workspace and refuses one without a reason or
+  with a reason of no kind `AGENTS.md` admits (billed, local, by hand, child, limit), and one in a
+  test target built only with feature `live` without `billed`, naming the file, the line and the
+  reason; it runs in `task test-run`.
+- `inference-elevenlabs`, `inference-cartesia`: `CLOSE_GRACE` (5 ms), the most a drop of a
+  synthesis inside a Tokio runtime waits for its close on the dropping thread.
+- `inference-openai`: `LiveClient::with_close_timeout` and `LiveClient::close_timeout`, and
+  `OpenAiLive::with_close_timeout` and `OpenAiLive::close_timeout`: the most a graceful close of a
+  GPT-Live session waits for the provider's last messages. Unset, it is `CLOSE_TIMEOUT`, 15
+  seconds, as before; a close takes at most the longer of it and the endpoint's read timeout.
+- `repo-podcast` (example, not published): `Settings::silent_turn`, how long a model that creates
+  its own responses may send nothing before its turn is given up; 10 seconds by default, as before.
+  A `Settings` written as a struct literal without `..Settings::default()` has to name the field.
+- `inference-docs` (not published): the command `assess` writes the record of one assessment of
+  `quality/` from a file a run left behind, a JUnit report of cargo-nextest or the captured output
+  of a command that prints a duration, in the form Ratchet's specification gives a record. It runs
+  no measure. It exits 1 and writes nothing when the file does not hold what the assessment
+  reads: a named test that did not run, a failed run, a run whose output ends before its closing
+  line, counts that disagree with the report's own.
+  `quality/README.md` says which assessments it reads and how it is called. The committed records
+  are still the ones written by hand. No crate's API changes.
+- `realtime-voice` (example, not published): `elevenlabs::resolves_within(source, wait)`, the key
+  check with its wait as an argument; `elevenlabs::resolves` calls it with `KEY_WAIT`, 8 seconds,
+  as before.
+- `quality/` and `ratchet.toml`: the quality of the repository, written in the formats of Ratchet
+  at its commit `f139eccc17a548444f0f4e1dc06520120c28739f`: 44 measures with their command, unit,
+  direction, bound and baseline (`quality/README.md`), what is not measured
+  (`quality/not-measured.md`), and a test in `task test-run` that fails when the documents stop
+  agreeing with each other, with `Taskfile.yml` or with that page. No Ratchet command works at
+  that commit; the documents add no gate and change none. No crate's API changes.
+- `quality/adapters.md`: the quality definition per adapter crate, one section per directory under
+  `adapters/`: the tests run and passed and the slowest test in the check run, the time bounds its
+  tests hold (nine adapters), the records its tests hold (eight adapters), and 26 measures of
+  latency and connect time that name their command, clock, unit and direction and carry no
+  baseline, because no run of those commands is kept. `quality/README.md` gains what a release
+  holds; `quality/not-measured.md` gains what no test fires, per binding. The test of the quality
+  documents now also fails when a section and an adapter directory disagree, when a named test is
+  no function of its file, when a `cargo test` or `cargo run` command names a package, a target or
+  a feature that does not exist, when a measurement names a boundary its assessor does not
+  declare, when the coverage of a record counts something else than its plan and its assessor
+  name, and when an entry without a baseline carries a number, a record or a requirement. The
+  documents add no gate and change none. No crate's API changes.
+- The documentation site: the adapter reference gains the section "Opens, closes and drops", per
+  binding what an open, a close or a drop gives a caller where this release changed it: the close
+  timeout of GPT-Live, the drop of an ElevenLabs and of a Cartesia synthesis, the signed URL of an
+  ElevenLabs agent model. `inference-docs` reads the value of each constant a note names from the
+  adapter's source and refuses a note its sources do not hold. The error reference says that an
+  adapter's own error types are not on it. The guides "Run the checks", "Compare voice providers"
+  and "Talk to a hosted voice model" and the page of the `repo-podcast` example say these changes
+  where their reader meets them. No crate's API changes.
+
+### Changed
+
+- `task check` runs `task quality-records` after `task test-run`: it writes the record of every
+  assessment of `quality/` that reads the run's JUnit report to
+  `target/quality-records/<plan>/<assessment>.evidence.json`, and fails naming each assessment the
+  report does not hold. The workflow `check` runs the same step and uploads those records from each
+  push to `main` as the artifact `quality-records-<commit>`. `inference-docs junit-assessments`
+  lists the assessments it writes. No crate's API changes.
+- `task test-build` ends with `task test-fixtures`, which synthesizes the conformance suites the
+  tests of `inference-testkit` read once, into a cache keyed by the digest of their sources, so
+  `task test-run` waits for no synthesis. The default cargo-nextest profile runs 8 tests at once;
+  `NEXTEST_TEST_THREADS` wins over it. Six slow tests keep their inputs and assertions at a lower
+  cost.
+- Tests: the drop tests of `inference-cartesia` and `inference-elevenlabs` hold the close bound to
+  numbers written out: 1 s, and outside a runtime at most 100 ms more once the host's scheduler
+  delay is taken out. A changed `CLOSE_BOUND` fails them. The ElevenLabs drop tests that wait for
+  the bound end at a limit of their own, 10 s. A Cartesia test reaches the bound on the close of a
+  connection alone, through a synthesis that fails on a backed-up connection, and holds it to
+  900 ms to 1.2 s after the stall.
+- Tests: four tests that failed on a loaded host now wait for the event they need, or take the
+  host's scheduler delay out of the time they measure: the Deepgram keep-alive test (which still
+  fails when two KeepAlives take 2 s at an interval of 100 ms), two Nova Sonic duplex tests, and
+  the Cartesia and ElevenLabs tests of the hold of a drop inside a runtime. The Nova Sonic wait for
+  an event ends with its own message after 20 s.
+- Tests: the ElevenLabs ticker tests plant 200 ms of processor time and fail on it beside a load
+  pinned to their processor, and fail with their own message when the kernel counts a sleep as
+  ready to run; the Nova Sonic tests of eight files wait for the event they assert instead of for
+  100 ms of quiet.
+- `task test-run` prints `task test-run was ended at its bound of 120 s` also when a part outlived
+  the first signal and was killed, and its list of the ten slowest tests is of the run that just
+  ended: `no test ran` when that run left no report. `task` exits 201 when the bound ends the step.
+- `task test-run` runs the stack test under the cargo-nextest profile `stack`, so that
+  `target/nextest/default/junit.xml` stays the report of the workspace run after the step.
+- `quality/`: the assessor `nextest-run@1` no longer reports `skipped`, and the record of
+  `workspace-tests` holds 0 there instead of 72. cargo-nextest 0.9.143 writes no ignored test into
+  its JUnit report, so a record written from that report cannot hold the count;
+  `quality/README.md` says that the 72 come from the `Summary` line of the run.
+- The `check` workflow runs the full gate for a pull request that changes a file under
+  `quality/`, also a `*.md` file: the test of the quality documents reads them.
+- `realtime-voice`, example `compare`: with `ELEVENLABS_AGENT_SIGNED_URL` the ElevenLabs arm measures
+  its first run and records every later run with the refusal as its note; with `ELEVENLABS_AGENT_ID`
+  it runs them all, as before.
+
+### Fixed
+
+- `inference-elevenlabs` (feature `duplex`): the signed URL of a private agent, whose token is a
+  credential, is no longer kept by the model past the handshake. The handshake request's URI is the
+  signed URL's own buffer instead of a copy, and the buffer is zeroized when the open's handshake
+  ends or is dropped, however it ends. The crate documentation lists every copy of the token.
+- `inference-elevenlabs`, `inference-cartesia`: dropping a synthesis inside a Tokio runtime holds
+  the dropping thread at most `CLOSE_GRACE` (5 ms). Before, the drop held it until the close was
+  written, at most `CLOSE_BOUND` (1 s). A close that ended within the grace has been sent when the
+  drop returns, as before: `close_socket` for ElevenLabs, then a close frame. A close not written
+  within it runs to its end on the handle's own thread, bounded by `CLOSE_BOUND`, and that thread
+  then ends its runtime. A process that ends while such a close still runs ends the socket without
+  the close frame; for ElevenLabs the server may have received `close_socket` alone or neither.
+  Outside a Tokio runtime the drop waits for its close as before, at most `CLOSE_BOUND`; the drop
+  asks Tokio, so inside another executor it waits as it does outside a runtime. The crate docs
+  say what the server sees after a drop: the close from an idle handle, the end of the socket
+  without a close frame from a handle whose async form waits for a message.
+
 ## [0.33.0] — 2026-11-23
 
 Breaking since 0.12.0: a consumer upgrading from 0.12.0 meets the `Breaking` sections of these

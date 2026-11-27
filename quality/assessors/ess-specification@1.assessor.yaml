@@ -1,0 +1,13 @@
+format: ratchet-assessor/1
+name: ess-specification
+version: "1"
+targets: [revision]
+inputs:
+  path: {type: path, required: true}
+coverage_unit: file
+coverage: [executed, passed, failed]
+outputs:
+  valid:
+    {value_type: assertion, kind: exact, scopes: []}
+  scenarios:
+    {value_type: number, kind: exact, scopes: [], unit: scenarios}

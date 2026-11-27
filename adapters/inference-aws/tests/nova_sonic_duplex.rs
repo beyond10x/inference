@@ -8,6 +8,8 @@
 #![cfg(feature = "duplex")]
 
 mod replay;
+#[allow(dead_code)]
+mod wait;
 
 use std::num::{NonZeroU16, NonZeroU32};
 use std::time::{Duration, Instant};
@@ -31,8 +33,7 @@ use inference_duplex::{
 };
 use replay::{Faults, Replay, Reply, Turn, turn};
 use serde_json::{Value, json};
-
-const WAIT: Duration = Duration::from_millis(100);
+use wait::{WAIT, completed, drain, ended, until, until_within};
 
 fn pcm(sample_rate: u32) -> AudioFormat {
     AudioFormat {
@@ -104,38 +105,14 @@ fn speak(session: &mut impl SpeechSessionHandle, from: u64, frames: u64) {
     }
 }
 
-/// Every event until nothing arrives for one wait.
-fn drain(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    while let Some(event) = session.next_event(WAIT) {
-        events.push(event);
-        assert!(events.len() < 500, "the session never went quiet");
-    }
+/// Every event of a turn the replay answers with speech: up to the response's completion, then up
+/// to the usage event that follows it, the replay's last of the turn.
+fn answered(session: &mut impl SpeechSessionHandle) -> Vec<SessionEvent> {
+    let mut events = completed(session);
+    events.extend(until(session, |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(_))
+    }));
     events
-}
-
-/// Every event up to and including the first `stop` holds for.
-fn until(
-    session: &mut impl SpeechSessionHandle,
-    stop: impl Fn(&SessionEvent) -> bool,
-) -> Vec<SessionEvent> {
-    let mut events = Vec::new();
-    let mut idle = 0;
-    loop {
-        match session.next_event(WAIT) {
-            Some(event) => {
-                let done = stop(&event);
-                events.push(event);
-                if done {
-                    return events;
-                }
-            }
-            None => {
-                idle += 1;
-                assert!(idle < 30, "the awaited event never came: {events:#?}");
-            }
-        }
-    }
 }
 
 fn created(events: &[SessionEvent]) -> Vec<ResponseId> {
@@ -196,7 +173,7 @@ fn the_notice_over_a_finished_answer_is_reported_as_speech() {
     ]);
     let mut session = model(&replay).open(config()).expect("opens");
     speak(&mut session, 0, 2);
-    let first_turn = drain(&mut session);
+    let first_turn = answered(&mut session);
     let first = created(&first_turn)[0];
     assert_eq!(
         session.ledger().response(first).map(|r| r.state()),
@@ -220,7 +197,7 @@ fn the_notice_over_a_finished_answer_is_reported_as_speech() {
     session
         .append_audio(frame(pcm(16_000), 1_600, 0))
         .expect("silence");
-    let rest = drain(&mut session);
+    let rest = completed(&mut session);
     assert!(
         speech_started(&rest).is_empty(),
         "the turn's transcript adds no second report: {rest:#?}"
@@ -311,7 +288,9 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
         .open(config())
         .expect("the model takes the configuration");
     speak(&mut session, 0, 3);
-    let events = drain(&mut session);
+    let mut events = answered(&mut session);
+    // Quiet: the assertion below that only usage follows the completion needs nothing more to come.
+    events.extend(drain(&mut session));
 
     let responses = created(&events);
     assert_eq!(responses.len(), 1, "{events:#?}");
@@ -390,6 +369,11 @@ fn audio_in_gives_audio_and_transcript_out_on_one_response_id() {
 
 /// The mock's `speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id`: Nova
 /// Sonic's own barge-in, its late audio dropped.
+///
+/// After the barge-in the test waits for the next response to complete, then for the session to
+/// go quiet. On a host whose load average was 95 to 122 on 20 processors it waited only for the
+/// quiet, and a gap of the replay longer than [`WAIT`] ended the wait before the next response's
+/// transcript.
 #[test]
 fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
     let mut replay = Replay::new(vec![
@@ -408,7 +392,12 @@ fn speech_during_a_response_cancels_it_and_the_next_response_has_a_new_id() {
     let first = created(&events)[0];
 
     speak(&mut session, 1_280, 2);
-    let rest = drain(&mut session);
+    let mut rest = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id != first),
+    );
+    // Quiet: nothing of the cancelled response comes after, and its usage is recorded once.
+    rest.extend(drain(&mut session));
     let cancelled = position(
         &rest,
         |event| matches!(event, SessionEvent::ResponseCancelled(c) if c.response_id == first),
@@ -497,7 +486,10 @@ fn barge_in_by_the_caller_and_truncation_are_refused() {
         session.truncate_output(response, SampleClockPosition::new(160).expect("a position")),
         Err(SessionError::Unsupported(Unsupported::Truncation))
     );
-    let rest = drain(&mut session);
+    let rest = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == response),
+    );
     assert!(rest.iter().any(
         |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id == response)
     ));
@@ -523,7 +515,7 @@ fn a_tool_call_answered_on_the_session_yields_a_response_that_uses_its_result() 
         .open(config())
         .expect("the model takes the configuration");
     speak(&mut session, 0, 2);
-    let events = drain(&mut session);
+    let events = completed(&mut session);
     let first = created(&events)[0];
     let (call_id, response_id, tool_id, arguments) = events
         .iter()
@@ -551,7 +543,10 @@ fn a_tool_call_answered_on_the_session_yields_a_response_that_uses_its_result() 
     session
         .submit_tool_result(&call_id, json!({"celsius": 21}))
         .expect("the call awaits its result");
-    let answer = drain(&mut session);
+    let answer = until(
+        &mut session,
+        |event| matches!(event, SessionEvent::ResponseCompleted(done) if done.response_id != first),
+    );
     assert!(answer.iter().any(|event| matches!(
         event,
         SessionEvent::SpeechToolCallAnswered(answered) if answered.call_id == call_id
@@ -583,13 +578,15 @@ fn a_tool_result_that_is_not_an_object_is_sent_as_one() {
     }]);
     let mut session = model(&replay).open(config()).expect("opens");
     speak(&mut session, 0, 2);
-    let call_id = drain(&mut session)
-        .into_iter()
-        .find_map(|event| match event {
-            SessionEvent::SpeechToolCallProposed(proposed) => Some(proposed.call_id),
-            _ => None,
-        })
-        .expect("a proposed call");
+    let call_id = until(&mut session, |event| {
+        matches!(event, SessionEvent::SpeechToolCallProposed(_))
+    })
+    .into_iter()
+    .find_map(|event| match event {
+        SessionEvent::SpeechToolCallProposed(proposed) => Some(proposed.call_id),
+        _ => None,
+    })
+    .expect("a proposed call");
     session
         .submit_tool_result(&call_id, json!(21))
         .expect("the call awaits its result");
@@ -902,7 +899,7 @@ fn the_session_configuration_reaches_the_provider() {
         Err(SessionError::FormatMismatch { .. })
     ));
 
-    let events = drain(&mut session);
+    let events = completed(&mut session);
     let audio: Vec<&AudioFrame> = events
         .iter()
         .filter_map(|event| match event {
@@ -953,9 +950,9 @@ fn usage_is_a_running_total_per_response() {
     let replay = Replay::new(vec![turn("hi", "Hello"), turn("again", "Hello again")]);
     let mut session = model(&replay).open(config()).expect("opens");
     speak(&mut session, 0, 2);
-    let first_turn = drain(&mut session);
+    let first_turn = answered(&mut session);
     speak(&mut session, 960, 2);
-    let second_turn = drain(&mut session);
+    let second_turn = answered(&mut session);
     let expected = ResponseUsage {
         input: TokenCounts {
             text_tokens: 0,
@@ -990,7 +987,7 @@ fn usage_is_a_running_total_per_response() {
     }
 
     session.close().expect("open");
-    let closing = drain(&mut session);
+    let closing = ended(&mut session);
     let first = created(&first_turn)[0];
     let second = created(&second_turn)[0];
     assert!(
@@ -1112,8 +1109,23 @@ fn input_usage_no_response_took_is_recorded_before_the_sessions_failure() {
 /// unknown, never 0. Left out of every delta of a direction, so is input reported after the
 /// response ended, for a next response that never begins: the session's end records it as
 /// unknown, for the session.
+///
+/// The test closes the session once the last usage event it reads has arrived, and then waits
+/// for `SpeechSessionClosed`. On a host whose load average was 95 to 122 on 20 processors it
+/// waited for the session to go quiet instead, and the wait ended before the first event.
 #[test]
 fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
+    // The replay's last event is a usage event after the response, which reports 8 output text
+    // tokens. Where its delta leaves out the input speech tokens, it reaches the response's
+    // record and the session's, and the test waits for it: the running total it reports.
+    let last_usage: fn(&SessionEvent) -> bool = |event| {
+        matches!(event, SessionEvent::ResponseUsageRecorded(recorded)
+            if recorded.usage.output.text_tokens == 8)
+    };
+    // Where every delta leaves out the output text tokens, that event changes no count the test
+    // reads and reports none, so the test waits for the response to complete.
+    let response_completed: fn(&SessionEvent) -> bool =
+        |event| matches!(event, SessionEvent::ResponseCompleted(_));
     let complete = |unknown: QuantityKind| {
         [
             Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
@@ -1133,11 +1145,12 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
         })
         .to_vec()
     };
-    for (omits, unknown, session_record) in [
+    for (omits, unknown, session_record, settled) in [
         (
             ("output", "textTokens"),
             QuantityKind::OutputTextTokens,
             None,
+            response_completed,
         ),
         (
             ("input", "speechTokens"),
@@ -1146,6 +1159,7 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
                 Quantity::provider_reported(QuantityKind::InputTextTokens, 0),
                 Quantity::unknown(QuantityKind::InputAudioTokens),
             ]),
+            last_usage,
         ),
     ] {
         let mut replay = Replay::new(vec![turn("hi", "Hello")]);
@@ -1155,10 +1169,12 @@ fn a_count_nova_sonic_leaves_out_is_recorded_unknown_never_zero() {
         };
         let mut session = model(&replay).open(config()).expect("opens");
         speak(&mut session, 0, 2);
-        let mut events = drain(&mut session);
+        let mut events = until(&mut session, settled);
         let response = created(&events)[0];
         session.close().expect("open");
-        events.extend(drain(&mut session));
+        events.extend(until(&mut session, |event| {
+            matches!(event, SessionEvent::SpeechSessionClosed(_))
+        }));
         let recorded = usage_records(&events);
         let of_response: Vec<_> = recorded
             .iter()
@@ -1324,5 +1340,48 @@ fn with_its_own_barge_in_input_during_output_restarts_the_response() {
     assert!(
         matches!(refused, Err(NoNativeDuplex::Restarted { first, second }) if first != second),
         "{refused:?}"
+    );
+}
+
+/// [`until_within`] on a session whose events keep coming, each a little later than [`WAIT`],
+/// and none of them the one it waits for, fails with its own message at its limit. Every event
+/// resets the count of empty waits, so without the limit the wait would end only at its 500th
+/// event, 75 s here, past the runner's 60 s. [`until`] holds `wait::UNTIL_LIMIT`; this test gives
+/// the same wait 2 s so it ends within a few seconds.
+#[test]
+fn until_fails_with_its_message_on_a_slow_stream_that_never_brings_the_event() {
+    let mut replay = Replay::new(vec![turn("tell me a story", "Once upon a time")]);
+    replay.pace = Duration::from_millis(150);
+    replay.audio_frames = 1_000;
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut session = model(&replay).open(config()).expect("opens");
+        speak(&mut session, 0, 2);
+        let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            until_within(&mut session, |_| false, Duration::from_secs(2)).len()
+        }));
+        let message = waited.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default()
+        });
+        let _ = done.send(message);
+    });
+    let limit = Duration::from_secs(15);
+    let started = Instant::now();
+    let message = ended.recv_timeout(limit);
+    assert_eq!(
+        message.as_ref().map(Option::is_some),
+        Ok(true),
+        "until neither found the event nor failed within {:?} of a stream with one event every \
+         150 ms",
+        started.elapsed()
+    );
+    let message = message.ok().flatten().unwrap_or_default();
+    assert!(
+        message.starts_with("the awaited event did not come within 2s"),
+        "the wait fails with the message of its limit: {}",
+        message.lines().next().unwrap_or_default()
     );
 }

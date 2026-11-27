@@ -1,0 +1,12 @@
+format: ratchet-assessor/1
+name: named-tests
+version: "1"
+targets: [revision]
+inputs:
+  package: {type: string, required: true}
+  tests: {type: string, list: true, required: true}
+coverage_unit: test
+coverage: [executed, passed, failed]
+outputs:
+  passed:
+    {value_type: assertion, kind: exact, scopes: [test]}

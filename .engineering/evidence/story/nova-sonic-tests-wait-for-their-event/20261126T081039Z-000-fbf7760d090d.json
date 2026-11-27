@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-26T08:10:39Z",
+  "actor": "human:operator",
+  "artifact": "story:nova-sonic-tests-wait-for-their-event",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:tests-under-contention-adversary-1",
+    "review": "review-result:tests-under-contention-adversary-1",
+    "outcome": "fixed"
+  }
+}

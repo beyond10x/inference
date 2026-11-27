@@ -9,16 +9,13 @@
 //! `deliver_held` that does not check the row was still held would stamp it. The rule says an
 //! event the caller already had stays delivered as it was; a scenario of the rule must see this.
 //!
-//! The suite is synthesized with `ess` from `ess/`, as `conform.rs` does; `ess` must be on PATH.
+//! The suite is the one `ess` synthesizes from `ess/`, read through `suite/mod.rs` as `conform.rs`
+//! reads it; `ess` must be on PATH.
 
 #![allow(clippy::duplicate_mod)]
 
+mod suite;
 mod target;
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ess_conformance::target::{
     ConformanceTarget, EventObservationRequest, ExternalOutcomeControl, ImplementationIdentity,
@@ -111,45 +108,13 @@ impl ConformanceTarget for Mutant {
     }
 }
 
-fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root resolves")
-}
-
+/// The authored scenarios of the rule, cut out of the synthesized suite: the tests read no
+/// other scenario's status.
 fn synthesized() -> AdmittedSuite {
-    let root = repository_root();
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("the clock is past the epoch")
-        .as_millis();
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("adversary11-{millis}-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("the run directory is created");
-    let suite = dir.join("suite.json");
-    let output = Command::new("ess")
-        .args([
-            "verify",
-            "conform",
-            "synthesize",
-            "--path",
-            "ess",
-            "--scenarios",
-            "ess/scenarios",
-            "--out",
-            suite.to_str().expect("UTF-8"),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("`ess` runs; it must be on PATH");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let text = fs::read_to_string(&suite).expect("suite.json is readable");
-    AdmittedSuite::from_json(&text).expect("the synthesized suite is admitted")
+    let cut = suite::cut(&suite::synthesized(suite::Product::Authored), |id| {
+        AUTHORED.contains(&id)
+    });
+    AdmittedSuite::from_json(&cut).expect("the cut suite is admitted")
 }
 
 /// The status of each authored scenario of the story against `target`.

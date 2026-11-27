@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T12:15:47Z",
+  "actor": "human:operator",
+  "artifact": "story:close-bounds-fired-by-a-test",
+  "kind": "story",
+  "revision": 11,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build, task test-run at a1dd00dab on the build node, tree clean",
+    "reference": "check-source exit 0 (128 s); test-build exit 0 (172 s); test-run exit 201 (44 s): 3122 tests run: 3120 passed, 2 failed, 72 skipped. The two failures are twenty_recognitions_wait_for_the_server_without_blocking_the_runtime and twenty_syntheses_wait_for_the_server_without_blocking_the_runtime of inference-elevenlabs::async_handles: they are not of this unit, fail on its base under load and are corrected on main by the wave of 2026-11-24, which this branch has not taken in yet. The part of test-run after the workspace run did not start. The six new tests passed: a_close_on_a_backed_up_connection_ends_at_the_close_bound of inference-phonic::duplex 1.571 s, of inference-deepgram::agent_duplex 1.331 s, of inference-deepslate::opal_duplex 1.608 s, of inference-elevenlabs::agent_duplex 1.172 s; a_cancel_on_a_backed_up_connection_ends_its_thread_at_the_close_bound of inference-deepgram::cancel 1.271 s, of inference-elevenlabs::stt 1.180 s"
+  }
+}

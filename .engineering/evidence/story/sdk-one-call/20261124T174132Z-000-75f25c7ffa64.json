@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-24T17:41:32Z",
+  "actor": "human:operator",
+  "artifact": "story:sdk-one-call",
+  "kind": "story",
+  "revision": 24,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:sdk-one-call-adversary-1",
+    "review": "review-result:sdk-one-call-adversary-1",
+    "outcome": "fixed"
+  }
+}

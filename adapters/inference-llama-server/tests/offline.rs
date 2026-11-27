@@ -16,6 +16,7 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::scripted::{Scripted, TEXT_NO_USAGE, TEXT_TIMINGS_ONLY};
 use common::{DELTAS, Fixture, SERVED_MODEL};
@@ -242,6 +243,60 @@ fn the_model_declaration_names_the_pinned_checkpoint_its_licences_and_checksum()
     assert_eq!(
         CHECKSUM,
         "sha256:6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+    );
+}
+
+/// The three limits of the configuration a caller gets from `Config::new(..)`, each compared
+/// with its number written out. The adapter has no time constant of its own: the limits are the
+/// defaults of the HTTP client of `llm`, `llm_http::Limits::default()`, at the tag this crate's
+/// `Cargo.toml` pins. A move of that pin that changes one of them changes what a caller of this
+/// adapter gets, and is meant to fail here. The numbers below are the reference: outside this
+/// test only the line of `quality/not-measured.md` that names it states them.
+///
+/// The last two rows are the bound on establishing a connection. `Config` has no field for it:
+/// the adapter builds its client with `llm_http::HttpClient::new(config.limits)`, which takes
+/// `llm_http::CONNECT_TIMEOUT`. The rows read that constant, and a client built the same way
+/// from the limits of a new configuration. They fail on a move of the pin that changes the
+/// bound. They do not fail when the adapter builds its client with another bound: the adapter
+/// gives no reader of its client.
+#[test]
+fn the_time_bound_defaults_are_the_stated_numbers() {
+    let limits = Config::new("http://127.0.0.1:8080/v1", SERVED_MODEL).limits;
+    let client = llm_http::HttpClient::new(limits).expect("an HTTP client");
+    let defaults = [
+        (
+            "llm_http::CONNECT_TIMEOUT",
+            llm_http::CONNECT_TIMEOUT,
+            Duration::from_secs(15),
+        ),
+        (
+            "llm_http::HttpClient::new(Config::new(..).limits).connect_timeout()",
+            client.connect_timeout(),
+            Duration::from_secs(15),
+        ),
+        (
+            "Config::new(..).limits.response_headers",
+            limits.response_headers,
+            Duration::from_secs(60),
+        ),
+        (
+            "Config::new(..).limits.idle",
+            limits.idle,
+            Duration::from_secs(180),
+        ),
+        (
+            "Config::new(..).limits.total",
+            limits.total,
+            Duration::from_secs(600),
+        ),
+    ];
+    let changed: Vec<_> = defaults
+        .iter()
+        .filter(|(_, default, stated)| default != stated)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "each default that is not its stated number, as (name, default, stated): {changed:?}"
     );
 }
 

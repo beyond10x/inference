@@ -553,22 +553,14 @@ async fn a_model_id_or_url_that_cannot_form_the_request_is_refused_before_connec
     }
 }
 
-/// `LiveClient::close` waits for `session.closed` at most `CLOSE_TIMEOUT` in all, not per read:
-/// a server that answers the close only with messages the client cannot read, one every 100 ms,
-/// is given up at that bound, with the connection closed.
+/// The close timeout of a client is the documented 15 seconds unless it is given another, and
+/// the one it is given stays with the session across a split.
 #[tokio::test]
-async fn close_gives_up_at_its_bound_across_every_read() {
+async fn a_client_keeps_the_documented_close_timeout_unless_given_another() {
+    assert_eq!(CLOSE_TIMEOUT, Duration::from_secs(15));
     let (endpoint, _) = serve(|mut socket| async move {
         let _ = accept_start(&mut socket).await;
-        let close = receive(&mut socket).await;
-        assert_eq!(close["type"], "session.close");
-        let until = tokio::time::Instant::now() + CLOSE_TIMEOUT * 3;
-        while tokio::time::Instant::now() < until {
-            if socket.send(Message::text("not json")).await.is_err() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let _ = socket.next().await;
     })
     .await;
     let client = LiveClient::connect(
@@ -579,15 +571,54 @@ async fn close_gives_up_at_its_bound_across_every_read() {
     )
     .await
     .expect("the session starts");
+    assert_eq!(client.close_timeout(), CLOSE_TIMEOUT);
+    let client = client.with_close_timeout(Duration::from_secs(2));
+    assert_eq!(client.close_timeout(), Duration::from_secs(2));
+    let (sender, receiver) = client.into_split();
+    let client = LiveClient::reunite(sender, receiver).expect("one session's halves");
+    assert_eq!(client.close_timeout(), Duration::from_secs(2));
+}
+
+/// `LiveClient::close` waits for `session.closed` at most its close timeout in all, not per
+/// read: a server that answers the close only with messages the client cannot read, one every
+/// 100 ms, is given up at that bound, with the connection closed. The close timeout here is 2 s
+/// in place of `CLOSE_TIMEOUT`, over a read timeout of 1 s, so the test does not wait the 15 s;
+/// the server sends for three times as long as the close is given.
+#[tokio::test]
+async fn close_gives_up_at_its_bound_across_every_read() {
+    let close_timeout = Duration::from_secs(2);
+    let limit = close_timeout + Duration::from_secs(3);
+    let (endpoint, _) = serve(move |mut socket| async move {
+        let _ = accept_start(&mut socket).await;
+        let close = receive(&mut socket).await;
+        assert_eq!(close["type"], "session.close");
+        let until = tokio::time::Instant::now() + limit * 3;
+        while tokio::time::Instant::now() < until {
+            if socket.send(Message::text("not json")).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let client = LiveClient::connect(
+        &endpoint.with_read_timeout(Duration::from_secs(1)),
+        &FixedSource,
+        OPENAI_KEY_NAME,
+        &LiveSessionConfig::default(),
+    )
+    .await
+    .expect("the session starts")
+    .with_close_timeout(close_timeout);
     let started = tokio::time::Instant::now();
-    let closed = tokio::time::timeout(CLOSE_TIMEOUT + Duration::from_secs(3), client.close())
+    let closed = tokio::time::timeout(limit, client.close())
         .await
         .expect("close() outlived its bound");
     assert!(
-        matches!(closed, Err(RealtimeError::Stalled(_))),
+        matches!(closed, Err(RealtimeError::Stalled(bound)) if bound == close_timeout),
         "{closed:?}"
     );
-    assert!(started.elapsed() >= CLOSE_TIMEOUT - Duration::from_millis(100));
+    assert!(started.elapsed() >= close_timeout - Duration::from_millis(100));
 }
 
 /// The two fields of `session.closed` are read each on its own: one the server left out is

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T07:26:01Z",
+  "actor": "human:operator",
+  "artifact": "story:quality-per-adapter-and-latency-defined",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source, task test-build, task test-run at 39cc2971b on the build node",
+    "reference": "check-source exit 0 (182 s); test-build exit 0 (132 s); test-run exit 201 (83 s): 3097 tests run: 3095 passed, 2 failed, 72 skipped. The 74 tests of inference-docs passed. The 2 failed are twenty_recognitions_wait_for_the_server_without_blocking_the_runtime and twenty_syntheses_wait_for_the_server_without_blocking_the_runtime of inference-elevenlabs::async_handles; they fail on the base of this branch on the build node as well (story:ticker-tests-hold-on-a-loaded-host), and this branch changes no file under adapters/"
+  }
+}
