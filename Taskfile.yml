@@ -110,7 +110,7 @@ tasks:
       - cargo run -q -p inference-docs -- adopt-records --run "{{.RUN}}" --run-json "{{.RUN_JSON}}" --from "{{.DIR}}" --root .
 
   quality-live:
-    desc: The keyed live measures of OpenAI and ElevenLabs on this machine, outside check and every workflow, with inference-docs live. Prints the hosted calls of one run per provider and, without YES=1, calls nothing and exits 2. With YES=1, given only after the owner's yes to that count, it reads each key from the Secret Service into its commands' environment only and writes each record with inference-docs assess --class local to .ratchet/records/<plan>/<assessment>/<run id>.evidence.json, which git ignores.
+    desc: The keyed live measures of OpenAI and ElevenLabs on this machine, outside check and every workflow, with inference-docs live. Prints the hosted calls of one run per provider and, without YES=1, calls nothing; the program then exits 2, which task exits 201 for (task -x quality-live passes the 2 through). With YES=1, given only after the owner's yes to that count, it builds each measure through the pool without a key, runs its executable here under slot --local with its own key from the Secret Service in that run's environment only, and writes each record with inference-docs assess --class local to .ratchet/records/<plan>/<assessment>/<run id>.evidence.json, which git ignores.
     env:
       YES: '{{.YES}}'
     cmds:

@@ -1,9 +1,11 @@
 //! `task quality-live`, the lane that runs the keyed live measures of
 //! `quality/adapters.ratchet.yaml` on this machine (`inference-docs live`), held without a hosted
 //! call and without a key: a fake `secret-tool` first on `PATH` answers the attributes of the two
-//! keys with fixed values that are no keys and fails for any other call, and stubs in the place of
-//! the four commands (`--stubs`) print the outputs under `tests/fixtures/live/`, print the key they
-//! were given and write down which key variables they saw.
+//! keys with fixed values that are no keys and fails for any other call; a fake `cargo` writes
+//! down each build and its environment and answers with cargo's JSON, naming a stub as the
+//! executable of each measure; a fake `slot` writes down each run and starts the rest of its
+//! arguments after `--local`; the stubs print the outputs under `tests/fixtures/live/`, print the
+//! key they were given and write down which key variables they saw and where they ran.
 //!
 //! Every case runs the program on a root of its own under the target's scratch directory, with
 //! the plan files, the assessor declarations and `ratchet.toml` copied from the tree and the pin
@@ -37,6 +39,43 @@ const MEASURES: [(&str, &str, bool); 4] = [
     ("elevenlabs-live-example", "ELEVENLABS_API_KEY", false),
     ("elevenlabs-cancel-probe", "ELEVENLABS_API_KEY", true),
 ];
+
+/// For each measure: the build the lane gives the pool, from the plan's command, the name of the
+/// test or example cargo builds, and the arguments the lane gives its executable.
+const BUILDS: [(&str, &str, &str, &str); 4] = [
+    (
+        "openai-speech-live",
+        "cargo test --no-run --message-format=json-render-diagnostics -p inference-openai --features live,speech --test speech_live",
+        "speech_live",
+        " --ignored --nocapture",
+    ),
+    (
+        "openai-gpt-live",
+        "cargo test --no-run --message-format=json-render-diagnostics -p inference-openai --features live,gpt-live --test live_gpt",
+        "live_gpt",
+        " --ignored --nocapture",
+    ),
+    (
+        "elevenlabs-live-example",
+        "cargo build --message-format=json-render-diagnostics -p inference-elevenlabs --features live --example live",
+        "live",
+        "",
+    ),
+    (
+        "elevenlabs-cancel-probe",
+        "cargo test --no-run --message-format=json-render-diagnostics -p inference-elevenlabs --features live --test tts_cancel_live",
+        "tts_cancel_live",
+        " --ignored --nocapture",
+    ),
+];
+
+fn build_of(measure: &str) -> (&'static str, &'static str, &'static str) {
+    BUILDS
+        .iter()
+        .find(|(of, _, _, _)| *of == measure)
+        .map(|(_, build, name, arguments)| (*build, *name, *arguments))
+        .expect("a measure of the lane")
+}
 
 /// The count the lane prints before it calls anything, with a voice id.
 const COUNT: &str = "\
@@ -165,6 +204,7 @@ impl Case {
                     "#!/bin/sh\nprintf '%s\\n' '{measure}' >> '{calls}'\n\
                      printf 'OPENAI_API_KEY=%s\\nELEVENLABS_API_KEY=%s\\nINFERENCE_OPENAI_KEY_SOURCE=%s\\n' \
                      \"${{OPENAI_API_KEY-<unset>}}\" \"${{ELEVENLABS_API_KEY-<unset>}}\" \"${{INFERENCE_OPENAI_KEY_SOURCE-<unset>}}\" > '{seen}'\n\
+                     printf 'PWD=%s\\n' \"$(pwd)\" >> '{seen}'\n\
                      printf 'the key given: %s\\n' \"${{{variable}-}}\" >&2\n\
                      cat '{output}'\n",
                     calls = calls.display(),
@@ -173,12 +213,77 @@ impl Case {
                 ),
             );
         }
-        Self { dir, root }
+        let case = Self { dir, root };
+        case.cargo(&case.dir.join("stubs"));
+        executable(
+            &case.dir.join("bin/slot"),
+            &format!(
+                "#!/bin/sh\nprintf 'slot %s\\n' \"$*\" >> '{calls}'\n[ \"$1\" = --local ] || exit 64\nshift\nexec \"$@\"\n",
+                calls = calls.display(),
+            ),
+        );
+        case
+    }
+
+    /// The package directory the fake `cargo` names as the manifest's of every test.
+    fn package(&self) -> PathBuf {
+        self.dir.join("package")
+    }
+
+    /// Writes the fake `cargo`: it writes down its call, and its environment under a line
+    /// `--- cargo <arguments>` in `build-env`, and answers with the JSON of a dependency without
+    /// an executable and of the test or example named by `--test` or `--example`, whose
+    /// executable is `<executables>/<measure>`.
+    fn cargo(&self, executables: &Path) {
+        fs::create_dir_all(self.package()).expect("the package directory is made");
+        let mut names = String::new();
+        for (measure, _, name, _) in BUILDS {
+            names.push_str(&format!("  {name}) measure={measure} ;;\n"));
+        }
+        executable(
+            &self.dir.join("bin/cargo"),
+            &format!(
+                "#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> '{calls}'\n\
+                 {{ printf -- '--- cargo %s\\n' \"$*\"; env; }} >> '{environment}'\n\
+                 kind=\nname=\nprevious=\n\
+                 for word in \"$@\"; do\n\
+                 case $previous in --test) kind=test; name=$word ;; --example) kind=example; name=$word ;; esac\n\
+                 previous=$word\n\
+                 done\n\
+                 case $name in\n{names}  *) exit 101 ;;\nesac\n\
+                 printf '%s\\n' '{{\"reason\":\"compiler-artifact\",\"target\":{{\"kind\":[\"lib\"],\"name\":\"dependency\"}},\"manifest_path\":\"/nowhere/Cargo.toml\",\"executable\":null,\"fresh\":true}}'\n\
+                 printf '{{\"reason\":\"compiler-artifact\",\"target\":{{\"kind\":[\"%s\"],\"name\":\"%s\"}},\"manifest_path\":\"%s\",\"executable\":\"%s\",\"fresh\":false}}\\n' \
+                 \"$kind\" \"$name\" '{manifest}' '{executables}'/\"$measure\"\n\
+                 printf '%s\\n' '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
+                calls = self.dir.join("calls").display(),
+                environment = self.dir.join("build-env").display(),
+                manifest = self.package().join("Cargo.toml").display(),
+                executables = executables.display(),
+            ),
+        );
+    }
+
+    /// The three calls one measure makes: its build, its run under `slot --local`, and its stub.
+    fn steps(&self, measure: &str) -> [String; 3] {
+        let (build, _, arguments) = build_of(measure);
+        [
+            build.to_owned(),
+            format!(
+                "slot --local {}{arguments}",
+                self.dir.join("stubs").join(measure).display()
+            ),
+            measure.to_owned(),
+        ]
     }
 
     /// Runs the lane with `YES` set to `yes` and `ELEVENLABS_VOICE_ID` to `voice`, the two key
     /// variables of the shell set to [`SHELL_VALUE`].
     fn run(&self, yes: Option<&str>, voice: Option<&str>) -> Lane {
+        self.run_with(yes, voice, &[])
+    }
+
+    /// [`Case::run`] with `more` arguments.
+    fn run_with(&self, yes: Option<&str>, voice: Option<&str>, more: &[&str]) -> Lane {
         let path = format!(
             "{}:{}",
             self.dir.join("bin").display(),
@@ -189,8 +294,7 @@ impl Case {
             .arg("live")
             .arg("--root")
             .arg(&self.root)
-            .arg("--stubs")
-            .arg(self.dir.join("stubs"))
+            .args(more)
             .env("PATH", path)
             .env("OPENAI_API_KEY", SHELL_VALUE)
             .env("ELEVENLABS_API_KEY", SHELL_VALUE)
@@ -356,20 +460,35 @@ fn with_yes_each_command_sees_only_its_own_key_and_one_record_per_read_measure_i
         lane.stderr
     );
     assert!(lane.stdout.starts_with(COUNT), "stdout:\n{}", lane.stdout);
+    let mut expected = vec![format!(
+        "secret-tool lookup service b10x-secrets username {OPENAI_KEY}"
+    )];
+    expected.extend(case.steps("openai-speech-live"));
+    expected.extend(case.steps("openai-gpt-live"));
+    expected.push(format!(
+        "secret-tool lookup service b10x-secrets username {ELEVENLABS_KEY}"
+    ));
+    expected.extend(case.steps("elevenlabs-live-example"));
+    expected.extend(case.steps("elevenlabs-cancel-probe"));
     assert_eq!(
         case.calls(),
-        [
-            format!("secret-tool lookup service b10x-secrets username {OPENAI_KEY}"),
-            "openai-speech-live".to_owned(),
-            "openai-gpt-live".to_owned(),
-            format!("secret-tool lookup service b10x-secrets username {ELEVENLABS_KEY}"),
-            "elevenlabs-live-example".to_owned(),
-            "elevenlabs-cancel-probe".to_owned(),
-        ],
-        "each key is read once, before the commands of its provider"
+        expected,
+        "each key is read once, before the builds and runs of its provider, and each measure is built, then run under slot --local"
     );
     for (measure, variable, _) in MEASURES {
         let seen = case.seen(measure);
+        let directory = if measure == "elevenlabs-live-example" {
+            case.root.clone()
+        } else {
+            case.package()
+        };
+        assert_eq!(
+            Path::new(&seen["PWD"])
+                .canonicalize()
+                .expect("the directory"),
+            directory.canonicalize().expect("the directory"),
+            "{measure} runs where cargo runs it: a test in its package, an example in the root"
+        );
         let (own, other, value) = if variable == "OPENAI_API_KEY" {
             ("OPENAI_API_KEY", "ELEVENLABS_API_KEY", OPENAI_VALUE)
         } else {
@@ -492,15 +611,13 @@ fn a_missing_or_empty_key_skips_the_measures_of_its_provider_by_name_and_the_oth
         lane.says(&format!(
             "quality-live: skipped openai-speech-live, openai-gpt-live: the Secret Service gives no key for {OPENAI_KEY}"
         ));
-        assert_eq!(
-            case.calls(),
-            [
-                format!("secret-tool lookup service b10x-secrets username {OPENAI_KEY}"),
-                format!("secret-tool lookup service b10x-secrets username {ELEVENLABS_KEY}"),
-                "elevenlabs-live-example".to_owned(),
-                "elevenlabs-cancel-probe".to_owned(),
-            ]
-        );
+        let mut expected = vec![
+            format!("secret-tool lookup service b10x-secrets username {OPENAI_KEY}"),
+            format!("secret-tool lookup service b10x-secrets username {ELEVENLABS_KEY}"),
+        ];
+        expected.extend(case.steps("elevenlabs-live-example"));
+        expected.extend(case.steps("elevenlabs-cancel-probe"));
+        assert_eq!(case.calls(), expected, "no build of a skipped measure");
         assert!(case.records("openai-speech-live").is_empty());
         assert!(case.records("openai-gpt-live").is_empty());
         assert_eq!(case.records("elevenlabs-cancel-probe").len(), 1);
@@ -534,14 +651,12 @@ fn without_a_voice_id_the_elevenlabs_measures_are_skipped_by_name_and_their_key_
     lane.says(
         "quality-live: skipped elevenlabs-live-example, elevenlabs-cancel-probe: ELEVENLABS_VOICE_ID is unset",
     );
-    assert_eq!(
-        case.calls(),
-        [
-            format!("secret-tool lookup service b10x-secrets username {OPENAI_KEY}"),
-            "openai-speech-live".to_owned(),
-            "openai-gpt-live".to_owned(),
-        ]
-    );
+    let mut expected = vec![format!(
+        "secret-tool lookup service b10x-secrets username {OPENAI_KEY}"
+    )];
+    expected.extend(case.steps("openai-speech-live"));
+    expected.extend(case.steps("openai-gpt-live"));
+    assert_eq!(case.calls(), expected);
     assert_eq!(case.records("openai-speech-live").len(), 1);
     assert_eq!(case.records("openai-gpt-live").len(), 1);
     lane.says(
@@ -562,6 +677,10 @@ fn the_lane_is_a_task_outside_the_gate_and_its_directory_is_ignored() {
         .as_str()
         .expect("the task quality-live has a description");
     assert!(description.contains("YES=1"), "{description}");
+    assert!(
+        description.contains("task exits 201") && description.contains("task -x"),
+        "the description says what task returns when the program exits 2: {description}"
+    );
     let mut reached = vec!["check".to_owned()];
     let mut at = 0;
     while at < reached.len() {
@@ -689,9 +808,7 @@ fn a_key_given_with_a_line_end_reaches_its_command_exactly() {
     let case = Case::new(Key::Given(OPENAI_VALUE), Key::Missing);
     executable(
         &case.dir.join("bin/secret-tool"),
-        &format!(
-            "#!/bin/sh\n[ \"$5\" = '{OPENAI_KEY}' ] || exit 1\nprintf '%s\\n' '{SPACED}'\n"
-        ),
+        &format!("#!/bin/sh\n[ \"$5\" = '{OPENAI_KEY}' ] || exit 1\nprintf '%s\\n' '{SPACED}'\n"),
     );
     let exact = case.dir.join("exact");
     executable(
@@ -722,7 +839,12 @@ fn a_yes_that_is_not_exactly_1_calls_nothing() {
     for yes in ["10", " 1", "1 ", "01", "true", "Y", "1\n"] {
         let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
         let lane = case.run(Some(yes), Some("voice-0001"));
-        assert_eq!(lane.status, Some(2), "YES={yes:?}; stdout:\n{}", lane.stdout);
+        assert_eq!(
+            lane.status,
+            Some(2),
+            "YES={yes:?}; stdout:\n{}",
+            lane.stdout
+        );
         case.called_nothing();
     }
 }
@@ -737,8 +859,6 @@ fn without_secret_tool_every_measure_is_skipped_by_name() {
         .arg("live")
         .arg("--root")
         .arg(&case.root)
-        .arg("--stubs")
-        .arg(case.dir.join("stubs"))
         .env("PATH", &empty)
         .env("YES", "1")
         .env("ELEVENLABS_VOICE_ID", "voice-0001")
@@ -811,7 +931,10 @@ fn no_task_a_workflow_or_check_reaches_starts_the_lane() {
         let mut next = Vec::new();
         for command in task["cmds"].as_sequence().into_iter().flatten() {
             let text = serde_json::to_string(command).expect("a command");
-            assert!(!starts_the_lane(&text), "task {name} starts the lane: {text}");
+            assert!(
+                !starts_the_lane(&text),
+                "task {name} starts the lane: {text}"
+            );
             if let Some(called) = command.get("task").and_then(serde_norway::Value::as_str) {
                 next.push(called.to_owned());
             }
@@ -830,4 +953,148 @@ fn no_task_a_workflow_or_check_reaches_starts_the_lane() {
             }
         }
     }
+}
+
+/// The builds go to the pool as plain `cargo` and carry no key: no key variable and no key's
+/// value is in the environment of any build. Every run starts with `slot --local`, on this
+/// machine, and is the executable the build named, never `cargo`.
+#[test]
+fn the_builds_carry_no_key_and_every_run_starts_under_slot_local() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(lane.status, Some(0), "stdout:\n{}", lane.stdout);
+    let environment =
+        fs::read_to_string(case.dir.join("build-env")).expect("the builds ran with an environment");
+    let builds: Vec<&str> = environment
+        .lines()
+        .filter_map(|line| line.strip_prefix("--- cargo "))
+        .collect();
+    assert_eq!(builds.len(), 4, "one build per measure: {builds:?}");
+    for line in environment.lines() {
+        for variable in [
+            "OPENAI_API_KEY=",
+            "ELEVENLABS_API_KEY=",
+            "INFERENCE_OPENAI_KEY_SOURCE=",
+        ] {
+            assert!(!line.starts_with(variable), "a build sees {line}");
+        }
+    }
+    for value in [OPENAI_VALUE, ELEVENLABS_VALUE, SHELL_VALUE] {
+        assert!(!environment.contains(value), "a build sees a key");
+    }
+    let calls = case.calls();
+    for (at, call) in calls.iter().enumerate() {
+        if MEASURES.iter().any(|(measure, _, _)| call == measure) {
+            let before = calls[..at].last().map(String::as_str).unwrap_or_default();
+            assert!(
+                before.starts_with("slot --local "),
+                "{call} is started by {before:?}"
+            );
+        }
+        if call.starts_with("slot ") {
+            assert!(call.starts_with("slot --local "), "{call}");
+        }
+        if call.starts_with("cargo ") {
+            assert!(
+                call.starts_with("cargo test --no-run ") || call.starts_with("cargo build "),
+                "a build only: {call}"
+            );
+        }
+    }
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("slot --local "))
+            .count(),
+        4,
+        "{calls:?}"
+    );
+}
+
+/// A build that fails, or that names an executable this machine does not have, runs nothing and
+/// counts as failed.
+#[test]
+fn a_build_that_fails_or_names_no_executable_here_runs_nothing_and_counts_as_failed() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    executable(
+        &case.dir.join("bin/cargo"),
+        &format!(
+            "#!/bin/sh\nprintf 'cargo %s\\n' \"$*\" >> '{}'\nexit 101\n",
+            case.dir.join("calls").display()
+        ),
+    );
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(lane.status, Some(1), "stdout:\n{}", lane.stdout);
+    for (measure, _, _) in MEASURES {
+        lane.says(&format!("quality-live: {measure}: its build exited 101"));
+        assert!(case.records(measure).is_empty());
+    }
+    lane.says(
+        "quality-live: 0 records written under .ratchet/records/, 0 measures skipped, 4 failed",
+    );
+    assert!(
+        case.calls()
+            .iter()
+            .all(|call| call.starts_with("secret-tool ") || call.starts_with("cargo ")),
+        "nothing runs after a failed build: {:?}",
+        case.calls()
+    );
+
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    let elsewhere = case.dir.join("on-a-build-node");
+    case.cargo(&elsewhere);
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(lane.status, Some(1), "stdout:\n{}", lane.stdout);
+    for (measure, _, _) in MEASURES {
+        lane.says(&format!(
+            "quality-live: {measure}: the executable {} its build named is not on this machine",
+            elsewhere.join(measure).display()
+        ));
+    }
+    lane.says(
+        "quality-live: 0 records written under .ratchet/records/, 0 measures skipped, 4 failed",
+    );
+    assert!(
+        !case.calls().iter().any(|call| call.starts_with("slot ")),
+        "{:?}",
+        case.calls()
+    );
+}
+
+/// A `secret-tool` that does not answer within the bound is ended, and its provider's measures
+/// are skipped by name; the bound is 10 s unless the call names another.
+#[test]
+fn a_secret_tool_that_does_not_answer_within_its_bound_skips_its_provider_by_name() {
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    executable(
+        &case.dir.join("bin/secret-tool"),
+        &format!(
+            "#!/bin/sh\nprintf 'secret-tool %s\\n' \"$*\" >> '{calls}'\n\
+             [ \"$5\" = '{OPENAI_KEY}' ] && exec sleep 30\n\
+             [ \"$5\" = '{ELEVENLABS_KEY}' ] && printf '%s' '{ELEVENLABS_VALUE}'\n",
+            calls = case.dir.join("calls").display()
+        ),
+    );
+    let started = std::time::Instant::now();
+    let lane = case.run_with(Some("1"), Some("voice-0001"), &["--key-timeout-ms", "300"]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the lane waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(lane.status, Some(0), "stdout:\n{}", lane.stdout);
+    lane.says(&format!(
+        "quality-live: skipped openai-speech-live, openai-gpt-live: secret-tool gave no answer for {OPENAI_KEY} within 300ms"
+    ));
+    assert!(case.records("openai-speech-live").is_empty());
+    assert_eq!(case.records("elevenlabs-cancel-probe").len(), 1);
+    let help = Command::new(env!("CARGO_BIN_EXE_inference-docs"))
+        .args(["live", "--help"])
+        .output()
+        .expect("the program runs");
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help.contains("--key-timeout-ms") && help.contains("[default: 10000]"),
+        "{help}"
+    );
 }
