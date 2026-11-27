@@ -250,7 +250,7 @@ impl Voice {
     /// # Errors
     ///
     /// Those of [`Stack::resolve_with`] over no environment and of [`Recipe::instantiate`]:
-    /// [`Error::RoleUnbound`](crate::Error::RoleUnbound) when the stack binds no `tts`.
+    /// [`Error::RoleUnbound`] when the stack binds no `tts`.
     pub fn new_with(stack: &Stack) -> Result<Self> {
         Ok(Self {
             handle: Handle::plan(Recipe::speak(), stack)?,
@@ -264,7 +264,7 @@ impl Voice {
     ///
     /// Those of [`AgentBuilder::start`](crate::AgentBuilder::start), [`Agent::commit`] and
     /// [`Agent::close`]; the error of the session's first [`Event::Error`], an
-    /// [`Error::Provider`](crate::Error::Provider) when the synthesiser's provider failed.
+    /// [`Error::Provider`] when the synthesiser's provider failed.
     pub async fn synthesise(&mut self, text: impl Into<String>) -> Result<Vec<AudioFrame>> {
         let text = text.into();
         let agent = self.handle.open().await?;
@@ -362,7 +362,7 @@ impl Voice {
     ///
     /// # Errors
     ///
-    /// [`Error::Device`](crate::Error::Device) when the speaker does not open, and those of
+    /// [`Error::Device`] when the speaker does not open, and those of
     /// [`Voice::synthesise`].
     #[cfg(feature = "audio-host")]
     pub async fn play(
