@@ -230,9 +230,12 @@ and runs `slot --local <executable> --ignored --nocapture` for each of the three
   The other measures run.
 - `ELEVENLABS_VOICE_ID` comes from the environment. Both ElevenLabs commands read it, so without
   it both are skipped by name, their key is not read, and the count says so.
-- A build that fails, or that names an executable that is not on this machine, runs nothing,
-  and its measure counts as failed. A build node that keeps the executables it builds is such a
-  case: its executables have to be on this machine before the lane can run them.
+- A build pool that builds on a node and copies the executables of a build back leaves the
+  executable here. One that does not, but can copy a path back after a job, is asked to: for an
+  executable under `target/` of the root that is not here, the lane runs one job
+  `slot --fetch <its path from the root> true`, without a key, before the run.
+- A build that fails, or that names an executable that is still not on this machine, runs
+  nothing, and its measure counts as failed.
 - The output of each run, standard output and error in one file, is kept at
   `.ratchet/runs/<run id>/<assessment>.out`. Its record is written from that file by
   `inference-docs assess --class local` to

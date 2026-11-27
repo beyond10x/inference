@@ -17,7 +17,10 @@
 //!   `cargo test <arguments> -- <test arguments>` is built as `cargo test --no-run
 //!   --message-format=json-render-diagnostics <arguments>`, and its `cargo run <arguments>` as
 //!   `cargo build --message-format=json-render-diagnostics <arguments>`. The executable is the one
-//!   cargo's JSON names for the test of `--test` or the example of `--example`.
+//!   cargo's JSON names for the test of `--test` or the example of `--example`. A pool that builds
+//!   on a node and copies a build's executables back leaves it here; when it is not here and
+//!   lies under `target/` of the root, one job of [`FETCH`], `slot --fetch <path> true`, copies
+//!   it back without a key; an executable still not here is refused.
 //! - The run is that executable under [`RUN_PREFIX`], `slot --local`, which starts it here with
 //!   the environment it is given, never on a build node. The executable gets the arguments the
 //!   plan's command gives after `--`, and starts where cargo would start it: a test in the
@@ -74,6 +77,9 @@ const REDACTED: &[u8] = b"[key]";
 const RUN_PREFIX: [&str; 2] = ["slot", "--local"];
 /// The message format of every build: cargo's JSON on standard output, its diagnostics rendered.
 const BUILD_FORMAT: &str = "--message-format=json-render-diagnostics";
+/// What brings an executable a build left on a build node here, its path from the root between
+/// the two: a job of its own that runs `true` and copies the path back after it.
+const FETCH: [&str; 3] = ["slot", "--fetch", "true"];
 
 /// One provider: its key, the variable its commands read it from, and its measures.
 struct Provider {
@@ -545,12 +551,6 @@ fn build(root: &Path, planned: &Planned) -> Result<(PathBuf, PathBuf), String> {
             ));
         }
     };
-    if !executable.is_file() {
-        return Err(format!(
-            "the executable {} its build named is not on this machine",
-            executable.display()
-        ));
-    }
     let directory = match (planned.kind, manifest) {
         ("test", Some(manifest)) => manifest
             .parent()
@@ -558,6 +558,61 @@ fn build(root: &Path, planned: &Planned) -> Result<(PathBuf, PathBuf), String> {
         _ => root.to_path_buf(),
     };
     Ok((executable, directory))
+}
+
+/// The executable a build named, on this machine. A build pool that builds on a node and copies
+/// the executables of its build back leaves it here already. Otherwise one job of [`FETCH`]
+/// copies it back, without a key, when it lies under `target/` of the root; an executable that is
+/// still not here is refused.
+fn here(root: &Path, id: &str, executable: &Path) -> Result<PathBuf, String> {
+    if executable.is_file() {
+        return Ok(executable.to_path_buf());
+    }
+    let not_here = format!(
+        "the executable {} its build named is not on this machine",
+        executable.display()
+    );
+    let top = std::path::absolute(root).map_err(|error| format!("{not_here} ({error})"))?;
+    let Some(relative) = executable
+        .strip_prefix(&top)
+        .ok()
+        .filter(|relative| relative.starts_with("target"))
+        .map(|relative| relative.display().to_string())
+    else {
+        return Err(format!(
+            "{not_here}, and is not under target/ of the root, where a fetch would bring it"
+        ));
+    };
+    let [program, flag, job] = FETCH;
+    println!("quality-live: {id}: fetch: {program} {flag} {relative} {job}");
+    let mut command = Command::new(program);
+    command
+        .args([flag, relative.as_str(), job])
+        .current_dir(root)
+        .stdin(Stdio::null());
+    for variable in KEY_VARIABLES {
+        command.env_remove(variable);
+    }
+    for provider in &PROVIDERS {
+        for (variable, _) in provider.also {
+            command.env_remove(variable);
+        }
+    }
+    let status = command.status().map_err(|error| {
+        format!("{not_here}, and `{program} {flag}` cannot be started ({error})")
+    })?;
+    if !status.success() {
+        return Err(format!(
+            "{not_here}, and `{program} {flag} {relative} {job}` exited {}",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    if !executable.is_file() {
+        return Err(format!(
+            "{not_here}, and `{program} {flag} {relative} {job}` did not bring it here"
+        ));
+    }
+    Ok(executable.to_path_buf())
 }
 
 /// Builds and runs `measure` with the key in its run's environment, keeps its output and writes
@@ -572,7 +627,9 @@ fn run_measure(
 ) -> Ran {
     let id = measure.assessment;
     println!("quality-live: {id}: build: {}", planned.build.join(" "));
-    let (executable, directory) = match build(root, planned) {
+    let (executable, directory) = match build(root, planned)
+        .and_then(|(executable, directory)| Ok((here(root, id, &executable)?, directory)))
+    {
         Ok(built) => built,
         Err(why) => {
             println!("quality-live: {id}: {why}");

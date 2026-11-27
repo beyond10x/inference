@@ -218,8 +218,18 @@ impl Case {
         executable(
             &case.dir.join("bin/slot"),
             &format!(
-                "#!/bin/sh\nprintf 'slot %s\\n' \"$*\" >> '{calls}'\n[ \"$1\" = --local ] || exit 64\nshift\nexec \"$@\"\n",
+                "#!/bin/sh\nprintf 'slot %s\\n' \"$*\" >> '{calls}'\n\
+                 if [ \"$1\" = --fetch ]; then\n\
+                 [ \"$#\" -eq 3 ] && [ \"$3\" = true ] || exit 64\n\
+                 {{ printf -- '--- slot %s\\n' \"$*\"; env; }} >> '{environment}'\n\
+                 if [ -f '{brings}' ]; then mkdir -p \"$(dirname \"$2\")\" && cp '{stubs}'/\"$(basename \"$2\")\" \"$2\"; fi\n\
+                 exit 0\n\
+                 fi\n\
+                 [ \"$1\" = --local ] || exit 64\nshift\nexec \"$@\"\n",
                 calls = calls.display(),
+                environment = case.dir.join("build-env").display(),
+                brings = case.dir.join("fetch-brings").display(),
+                stubs = case.dir.join("stubs").display(),
             ),
         );
         case
@@ -1047,7 +1057,7 @@ fn a_build_that_fails_or_names_no_executable_here_runs_nothing_and_counts_as_fai
     assert_eq!(lane.status, Some(1), "stdout:\n{}", lane.stdout);
     for (measure, _, _) in MEASURES {
         lane.says(&format!(
-            "quality-live: {measure}: the executable {} its build named is not on this machine",
+            "quality-live: {measure}: the executable {} its build named is not on this machine, and is not under target/ of the root, where a fetch would bring it",
             elsewhere.join(measure).display()
         ));
     }
@@ -1056,6 +1066,94 @@ fn a_build_that_fails_or_names_no_executable_here_runs_nothing_and_counts_as_fai
     );
     assert!(
         !case.calls().iter().any(|call| call.starts_with("slot ")),
+        "{:?}",
+        case.calls()
+    );
+}
+
+/// An executable the build left on a build node, under `target/` of the root, is brought here by
+/// one job `slot --fetch <its path from the root> true`, without a key, before it runs; one the
+/// fetch does not bring is refused and nothing runs.
+#[test]
+fn an_executable_left_on_the_build_node_is_fetched_before_it_runs() {
+    let relative = "target/debug/build/package/0123abcd/out";
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    case.cargo(&case.root.join(relative));
+    fs::write(case.dir.join("fetch-brings"), "").expect("the marker is written");
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(
+        lane.status,
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        lane.stdout,
+        lane.stderr
+    );
+    let mut expected = vec![format!(
+        "secret-tool lookup service b10x-secrets username {OPENAI_KEY}"
+    )];
+    for measure in [
+        "openai-speech-live",
+        "openai-gpt-live",
+        "elevenlabs-live-example",
+        "elevenlabs-cancel-probe",
+    ] {
+        if measure == "elevenlabs-live-example" {
+            expected.push(format!(
+                "secret-tool lookup service b10x-secrets username {ELEVENLABS_KEY}"
+            ));
+        }
+        let (build, _, arguments) = build_of(measure);
+        expected.push(build.to_owned());
+        expected.push(format!("slot --fetch {relative}/{measure} true"));
+        expected.push(format!(
+            "slot --local {}{arguments}",
+            case.root.join(relative).join(measure).display()
+        ));
+        expected.push(measure.to_owned());
+        lane.says(&format!(
+            "quality-live: {measure}: fetch: slot --fetch {relative}/{measure} true"
+        ));
+    }
+    assert_eq!(case.calls(), expected, "each fetch comes before its run");
+    lane.says(
+        "quality-live: 3 records written under .ratchet/records/, 0 measures skipped, 0 failed",
+    );
+    let environment = fs::read_to_string(case.dir.join("build-env")).expect("the environments");
+    assert_eq!(
+        environment
+            .lines()
+            .filter(|line| line.starts_with("--- slot --fetch "))
+            .count(),
+        4
+    );
+    for line in environment.lines() {
+        for variable in [
+            "OPENAI_API_KEY=",
+            "ELEVENLABS_API_KEY=",
+            "INFERENCE_OPENAI_KEY_SOURCE=",
+        ] {
+            assert!(!line.starts_with(variable), "a build or fetch sees {line}");
+        }
+    }
+
+    let case = Case::new(Key::Given(OPENAI_VALUE), Key::Given(ELEVENLABS_VALUE));
+    case.cargo(&case.root.join(relative));
+    let lane = case.run(Some("1"), Some("voice-0001"));
+    assert_eq!(lane.status, Some(1), "stdout:\n{}", lane.stdout);
+    for (measure, _, _) in MEASURES {
+        lane.says(&format!(
+            "quality-live: {measure}: the executable {} its build named is not on this machine, and `slot --fetch {relative}/{measure} true` did not bring it here",
+            case.root.join(relative).join(measure).display()
+        ));
+    }
+    lane.says(
+        "quality-live: 0 records written under .ratchet/records/, 0 measures skipped, 4 failed",
+    );
+    assert!(
+        !case
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("slot --local ")),
         "{:?}",
         case.calls()
     );
