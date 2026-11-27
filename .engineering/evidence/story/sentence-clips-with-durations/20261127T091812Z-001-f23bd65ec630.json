@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T09:18:12Z",
+  "actor": "human:operator",
+  "artifact": "story:sentence-clips-with-durations",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source exit 0 (62 s), task test-build exit 0 (141 s), task test-run exit 0 (30 s, Summary [19.133s] 3363 tests run: 3363 passed, 73 skipped), task quality-records exit 0 (23 tests run: 23 passed), at e75fef25f through the shared build pool",
+    "reference": "crates/inference/tests/oneshot.rs: three sentences three clips, no sentence end one clip, empty text no clip and no session, clip-001.wav onwards with durations equal to the files, missing directory and existing file refused, mu-law and A-law refused, more than 999 sentences refused; the adversary's 6 cases; inference 343 tests at 01896bbe7, 10 of 10 runs at 453548c1d"
+  }
+}

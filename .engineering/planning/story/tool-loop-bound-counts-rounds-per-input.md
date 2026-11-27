@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:tool-loop-bound-counts-rounds-per-input
 kind: story
-status: active
+status: implemented
 title: The tool loop's bound counts rounds per input, so a chat with tools does not end at its fifth call
 tags:
 - from-finding
 relations:
 - informed_by: review-result:sdk-one-call-adversary-2
 - serves: vision:inference
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T03:24:21Z", actor: "human:operator", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-25T03:24:22Z", actor: "human:operator", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-27T09:18:12Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 ## Context
 

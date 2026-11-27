@@ -22,7 +22,8 @@
 //! cascade speaker's handle is `Instantiation::sink` (feature `audio-host`) until the next open;
 //! `native_voice`'s confirmation hook is [`Instantiation::authority`] and the model's call ids
 //! [`Instantiation::call_ids`]. [`Recipe::tools`] gives `native_voice` its tools: its executor
-//! node runs each authorized call on the executor given for the call's tool.
+//! node runs each authorized call on the executor given for the call's tool. `chat` given tools
+//! declares the same authority and executor around its model node.
 
 mod dispatch;
 mod run;
@@ -56,9 +57,11 @@ use inference_pipeline::{
     Node, OverloadPolicy, PipelineId, PipelineSpec, PlanPipelineError, PlannedPipeline,
     PortDirection,
 };
+use inference_text::Span;
 use inference_tools::ToolExecutor;
 
 use self::dispatch::Dispatch;
+pub(crate) use self::run::{Proposed, ReplyPart};
 use crate::graph::{Builder, Implementation};
 use crate::{Error, Payload, Role, Stack};
 
@@ -76,7 +79,21 @@ const VAD: VadConfig = VadConfig {
     hold: Duration::from_millis(200),
 };
 
-/// How many times `native_voice`'s tool loop may return a call to the model: 4.
+/// How many times the tool loop of `native_voice`, and of `chat` given tools, may return calls
+/// to the model for one input: 4.
+///
+/// The tool authority counts the replies that end with calls, per generation and input, and
+/// answers a call past the bound as exhausted, which completes the generation. `chat`'s model
+/// node names on each call the event its reply answers, the text or the last result of the
+/// round before, and rests it on the text it answers: the calls of one reply count once, and
+/// each text of a conversation is counted anew. A turn whose model returns calls a fifth time
+/// therefore ends the session, as `chat`'s model node runs one generation for its whole run, and
+/// the conversation's history ends with it; a conversation whose turns each stay within the
+/// bound goes on. One reply may end with up to 8 calls, the capacity of the loop's feedback
+/// edge; a reply with more fails the run with an error naming that 8, and none of its calls
+/// runs. `native_voice`'s speech node names no event on its calls, so each of its calls counts
+/// by itself, one call a rejected one too, against the generation it belongs to, and each
+/// response of the speech model is a generation of its own.
 pub const MAX_TOOL_ITERATIONS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 
 /// The names the five built-in recipes hold in the recipe table.
@@ -162,7 +179,10 @@ impl Recipe {
     }
 
     /// Text in, the `agent` LLM node, text out: ingress `user_input`, egresses `assistant_text`
-    /// and `usage`, the usage record of each model call.
+    /// and `usage`, the usage record of each model call. Given tools ([`Recipe::tools`]), the
+    /// runtime's tool `authority` and `executor` nodes beside it, as in `native_voice`, and one
+    /// more egress, `tool_events`, which carries each call the model proposes, before the
+    /// authority takes it.
     #[must_use]
     pub fn chat() -> Self {
         Self::built_in(
@@ -174,7 +194,9 @@ impl Recipe {
     }
 
     /// Audio in, the `stt` node, committed text out: ingress `audio`, egresses
-    /// `transcript` and `usage`, the usage record of each recognition.
+    /// `transcript` and `usage`, the usage record of each recognition. No node opens a turn, so
+    /// the `stt` node recognises the whole of its audio as one turn and commits what is left at
+    /// the end of the audio.
     #[must_use]
     pub fn transcribe() -> Self {
         Self::built_in(
@@ -309,11 +331,19 @@ impl Recipe {
         self
     }
 
-    /// Gives `native_voice` the tools its model may call, each with the executor that runs it.
-    /// Each run offers them to the model's session beside the stack's own, its duplex node
-    /// proposes calls of them only, and its tool executor node runs each authorized call on the
-    /// executor given for its tool. A tool of a name given earlier is replaced. Without tools,
-    /// every call the model proposes is answered as denied. Every other recipe keeps them unused.
+    /// Gives `native_voice` and `chat` the tools their model may call, each with the executor
+    /// that runs it. Each run of `native_voice` offers them to the model's session beside the
+    /// stack's own, its duplex node proposes calls of them only, and its tool executor node runs
+    /// each authorized call on the executor given for its tool; without tools, every call the
+    /// model proposes is answered as denied. `chat` given tools declares the same tool loop
+    /// around its `agent` node, the nodes `authority` and `executor` bounded at
+    /// [`MAX_TOOL_ITERATIONS`], requires `tool_calling` of its `llm` binding and offers the
+    /// tools on the request its generation starts with; without tools it declares its one node
+    /// and offers none. Its session tells each call the model proposes, on the egress
+    /// `tool_events`, and a call held for confirmation when the session closes is denied, both
+    /// as in `native_voice`. A tool whose executor fails or panics fails its call, and the model
+    /// is given the failure as the call's result. A tool of a name given earlier is replaced.
+    /// Every other recipe keeps them unused.
     #[must_use]
     pub fn tools(
         mut self,
@@ -556,6 +586,8 @@ impl Recipe {
             #[cfg(feature = "audio-host")]
             sink: None,
             tools: None,
+            recognised: None,
+            replies: None,
         })
     }
 
@@ -584,7 +616,8 @@ impl Recipe {
         let (pipeline_id, declared) = declaration
             .build(catalog, profile_id, spec, |pipeline| match &self.topology {
                 Topology::Chat => {
-                    topology::chat(pipeline, capacity, &requirement);
+                    let tools = self.tools.tools().next().is_some();
+                    topology::chat(pipeline, capacity, &requirement, tools);
                     Ok(())
                 }
                 Topology::Transcribe => {
@@ -683,6 +716,10 @@ pub struct Instantiation {
     #[cfg(feature = "audio-host")]
     sink: Option<inference_audio_device::acknowledging::AcknowledgingHandle>,
     tools: Option<Tools>,
+    /// What the STT node of the run opened last recognises, when no node gives it turns.
+    recognised: Option<run::Recognised>,
+    /// What the model node of the run opened last answers, when the run built one.
+    replies: Option<run::Replies>,
 }
 
 /// Where an agent's typed text enters an instantiated recipe ([`Instantiation::text_ingress`]).
@@ -700,6 +737,7 @@ pub(crate) struct TextIngress {
 struct Tools {
     authority: Option<AuthorityHandle>,
     call_ids: Option<CallIds>,
+    proposed: Proposed,
 }
 
 impl Instantiation {
@@ -778,11 +816,10 @@ impl Instantiation {
     /// [`Recipe::with_node`] replaced that node.
     /// [`Error::Layer`] when a role-bound node's binding in `stack` is not the adapter the recipe
     /// was planned with, when the recipe builds no implementation for one of its nodes (an
-    /// application recipe's nodes no role binds and `with_node` did not give, `transcribe`, whose
-    /// topology has no turn ports,
-    /// and `voice_cascade` instantiated without an audio route), or when the session does not open (its source the facade's `OpenError`); the
-    /// refusal of a binding that builds no node, such as a deferred recogniser whose checkpoint
-    /// did not open. No session is left open.
+    /// application recipe's nodes no role binds and `with_node` did not give, and
+    /// `voice_cascade` instantiated without an audio route), or when the session does not open
+    /// (its source the facade's `OpenError`); the refusal of a binding that builds no node, such
+    /// as a deferred recogniser whose checkpoint did not open. No session is left open.
     pub async fn open(
         &mut self,
         stack: &Stack,
@@ -793,6 +830,8 @@ impl Instantiation {
             self.sink = None;
         }
         self.tools = None;
+        self.recognised = None;
+        self.replies = None;
         self.claims_concurrency(stack)?;
         let mut refused: Option<Error> = None;
         let mut nodes = run::Run::new(self, stack);
@@ -812,6 +851,8 @@ impl Instantiation {
             )
             .await;
         let tools = nodes.take_tools();
+        let recognised = nodes.take_recognised();
+        let replies = nodes.take_replies();
         #[cfg(feature = "audio-host")]
         let sink = nodes.into_sink();
         #[cfg(not(feature = "audio-host"))]
@@ -831,7 +872,29 @@ impl Instantiation {
             self.sink = sink;
         }
         self.tools = tools;
+        self.recognised = recognised;
+        self.replies = replies;
         Ok(opened)
+    }
+
+    /// The spans the STT node of the run opened last committed so far, in the order it committed
+    /// them, when no node gives that node turns, as in `transcribe`: it recognises the whole of
+    /// its audio as one turn. Empty before a run opened and for a recipe whose STT node is given
+    /// turns, as `voice_cascade`'s.
+    pub(crate) fn spans(&self) -> Vec<Span> {
+        self.recognised
+            .as_ref()
+            .map(run::Recognised::spans)
+            .unwrap_or_default()
+    }
+
+    /// A reader of what the model node of the run opened last answers from now on: the text of
+    /// each delta it sends, and the end of each reply, once every input it took is answered and
+    /// no tool call is awaited. A later reader replaces an earlier one. None before a run opened
+    /// and for a run that built no model node, as `voice_cascade`'s, whose agent node starts a
+    /// generation per turn.
+    pub(crate) fn replies(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<ReplyPart>> {
+        self.replies.as_ref().map(run::Replies::listen)
     }
 
     /// Refuses an `llm` binding of `stack` whose adapter does not claim
@@ -877,8 +940,8 @@ impl Instantiation {
 
     /// The confirmation hook of the tool authority of the run [`Instantiation::open`] opened
     /// last: a call of a tool that requires confirmation is held until it confirms or denies
-    /// it. None before a run opened, for every recipe but `native_voice`, and when
-    /// [`Recipe::with_node`] replaced its node `authority`.
+    /// it. None before a run opened, for every recipe but `native_voice` and `chat` given tools,
+    /// and when [`Recipe::with_node`] replaced its node `authority`.
     #[must_use]
     pub fn authority(&self) -> Option<&AuthorityHandle> {
         self.tools
@@ -894,6 +957,13 @@ impl Instantiation {
         self.tools
             .as_ref()
             .and_then(|tools| tools.call_ids.as_ref())
+    }
+
+    /// The calls the run [`Instantiation::open`] opened last told its session, with their
+    /// arguments; none where [`Instantiation::authority`] and [`Instantiation::call_ids`] are
+    /// both none.
+    pub(crate) fn proposed(&self) -> Option<&Proposed> {
+        self.tools.as_ref().map(|tools| &tools.proposed)
     }
 
     /// `recipe` instantiated over `stack` as this instantiation was: a cascade's audio over the
@@ -931,6 +1001,8 @@ impl Instantiation {
             self.sink = None;
         }
         self.tools = None;
+        self.recognised = None;
+        self.replies = None;
         let mut refused: Option<Error> = None;
         let mut nodes = run::Run::new(self, stack);
         let switched = session
@@ -949,6 +1021,8 @@ impl Instantiation {
             )
             .await;
         let tools = nodes.take_tools();
+        let recognised = nodes.take_recognised();
+        let replies = nodes.take_replies();
         #[cfg(feature = "audio-host")]
         let sink = nodes.into_sink();
         #[cfg(not(feature = "audio-host"))]
@@ -974,6 +1048,8 @@ impl Instantiation {
             self.sink = sink;
         }
         self.tools = tools;
+        self.recognised = recognised;
+        self.replies = replies;
         Ok(driver)
     }
 }

@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-27T09:18:12Z",
+  "actor": "human:operator",
+  "artifact": "story:tool-loop-bound-counts-rounds-per-input",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check-source exit 0 (62 s), task test-build exit 0 (141 s), task test-run exit 0 (30 s, Summary [19.133s] 3363 tests run: 3363 passed, 73 skipped), task quality-records exit 0 (23 tests run: 23 passed), at e75fef25f through the shared build pool",
+    "reference": "a_chat_whose_model_calls_its_tool_once_a_turn_answers_six_turns green (red at 4c9c9ec04); the native_voice and inference-runtime tests unchanged (git diff 4c9c9ec04 -- crates/inference-runtime empty); the bound cases 10 of 10 runs; correction bd6c8f78e: inference-pipeline 170, inference-runtime 287, inference 337 passed"
+  }
+}

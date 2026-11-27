@@ -66,7 +66,10 @@ pub enum Event {
     ToolCalled {
         /// The tool's name.
         name: String,
-        /// The call's arguments, when the agent's tool authority holds the call.
+        /// The call's arguments, as the model proposed them: those of the event the run told the
+        /// call with, whether or not the tool authority has taken the call yet. `null` only
+        /// when an application's own node (`Recipe::with_node`) told the call some other way
+        /// and the authority does not hold it yet.
         arguments: serde_json::Value,
         /// The call's id.
         call_id: ToolCallId,

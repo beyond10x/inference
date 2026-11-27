@@ -6,8 +6,15 @@
 //! The authority decides each call once. A proposal of a call it already holds or decided is
 //! refused as `AuthorizeToolCall/outcome/wrong-state`, naming the state it holds the call in, and
 //! is neither held again nor sent on. For any other proposal its input edge delivers, it first
-//! enforces its iteration rule: the proposals of one generation past the rule's maximum are
-//! rejected `exhausted`. On a feedback loop the rule is the one the pipeline declares for the
+//! enforces its iteration rule, how many times one generation may go round the loop for one
+//! input: a proposal past the rule's maximum is rejected `exhausted`. The proposals of one
+//! generation whose envelopes name the same triggering event (`causation_id`) and rest on the
+//! same span are the calls of one reply: they go round together and count once, and their input
+//! is that span, so each input of a generation is counted anew; once a reply is past the rule,
+//! every proposal of it is. A proposal whose envelope names no triggering event goes round by
+//! itself, and its generation is counted as one input whatever span it rests on; the two kinds
+//! are counted apart (`ess/domains/graph.yaml`, the feedback loop declaration). On a feedback
+//! loop the rule is the one the pipeline declares for the
 //! loop whose feedback edge arrives at the authority (529, 546), read from the planned pipeline
 //! ([`ToolAuthority::bounded_by`]); an authority on no loop may be given one
 //! ([`ToolAuthority::with_iteration_bound`]). It then rejects a call for a tool it was
@@ -67,6 +74,7 @@ use std::task::Poll;
 use inference_core::endpoint::{InputEndpoint, OutputEndpoint};
 use inference_core::envelope::{ControlKind, EventEnvelope, EventId};
 use inference_core::id::{GenerationId, NodeId, RunId};
+use inference_text::SpanId;
 use inference_tools::{
     AuthorizeError, AuthorizeToolCall, ConfirmationRequired, Json, RejectionReason, Tool, ToolCall,
     ToolCallAuthorized, ToolCallId, ToolCallRejected, ToolCallState, ToolCallStateConflict, ToolId,
@@ -358,9 +366,11 @@ impl ToolAuthority {
         }
     }
 
-    /// The same authority enforcing an iteration rule of `max_iterations`: of the proposals of
-    /// one generation it decides, the first `max_iterations` are decided as before and every later
-    /// one is rejected `exhausted`. An authority on a feedback loop takes its rule from the loop's
+    /// The same authority enforcing an iteration rule of `max_iterations`: of the replies of one
+    /// generation to one input it decides, the proposals of the first `max_iterations` are
+    /// decided as before and every later one is rejected `exhausted`, a proposal that names no
+    /// triggering event being a reply of its own to its generation's one input; see the module
+    /// documentation. An authority on a feedback loop takes its rule from the loop's
     /// declaration instead ([`ToolAuthority::bounded_by`]); one given both refuses to prepare
     /// unless they agree.
     #[must_use]
@@ -544,12 +554,55 @@ struct Exchanging<P> {
     calls: CallRecord,
     /// The generations an interruption named.
     interrupted: HashSet<GenerationId>,
-    /// How many proposals of each generation the authority decided.
-    iterations: HashMap<GenerationId, usize>,
+    /// How many times each generation went round the loop, for each of its inputs.
+    iterations: Iterations,
     input: Box<dyn InputEndpoint<P>>,
     output: Sending<P>,
     /// The edge of rejected calls, when the authority has one.
     rejected: Option<Sending<P>>,
+}
+
+/// The count of the iteration rule; see the module documentation.
+#[derive(Debug, Default)]
+struct Iterations {
+    /// How many proposals naming no triggering event the authority decided, per generation.
+    single: HashMap<GenerationId, usize>,
+    /// The replies admitted, per generation and input, the span their proposals rest on: each
+    /// named by the triggering event its proposals name, in the order they were admitted.
+    replies: HashMap<(GenerationId, SpanId), Vec<EventId>>,
+}
+
+impl Iterations {
+    /// Whether a proposal of `generation` resting on `basis`, naming `reply` as its triggering
+    /// event or none, is within the rule `max`, counting it: a reply already admitted is, a new
+    /// one is while fewer than `max` replies to its input were admitted, and a proposal naming
+    /// none is while it is one of the first `max` of its generation. Without a rule every
+    /// proposal is.
+    fn admits(
+        &mut self,
+        generation: GenerationId,
+        basis: SpanId,
+        reply: Option<EventId>,
+        max: Option<NonZeroUsize>,
+    ) -> bool {
+        let Some(max) = max else {
+            return true;
+        };
+        let Some(reply) = reply else {
+            let decided = self.single.entry(generation).or_default();
+            *decided = decided.saturating_add(1);
+            return *decided <= max.get();
+        };
+        let admitted = self.replies.entry((generation, basis)).or_default();
+        if admitted.contains(&reply) {
+            return true;
+        }
+        if admitted.len() >= max.get() {
+            return false;
+        }
+        admitted.push(reply);
+        true
+    }
 }
 
 /// One output edge of the authority and the stream it emits on it.
@@ -709,8 +762,8 @@ impl<P: ToolPayload> Exchanging<P> {
 
     /// The decision for the proposed `call`: a call held or decided already, then a generation
     /// an interruption named, then the iteration rule, then the tool, then the schema, then the
-    /// policy.
-    fn decide(&mut self, call: &ToolCall) -> Result<Decision, String> {
+    /// policy. `reply` is the triggering event the proposal's envelope names, if any.
+    fn decide(&mut self, call: &ToolCall, reply: Option<EventId>) -> Result<Decision, String> {
         if let Some(known) = self.calls.get(call.call_id()) {
             return Ok(Decision {
                 outcome: AuthorityOutcome::WrongState(ToolCallStateConflict {
@@ -722,12 +775,12 @@ impl<P: ToolPayload> Exchanging<P> {
         if self.interrupted.contains(&call.generation_id()) {
             return Self::reject(call, RejectionReason::Superseded);
         }
-        let iteration = self.iterations.entry(call.generation_id()).or_default();
-        *iteration += 1;
-        if self
-            .max_iterations
-            .is_some_and(|max_iterations| *iteration > max_iterations.get())
-        {
+        if !self.iterations.admits(
+            call.generation_id(),
+            call.basis_span_id(),
+            reply,
+            self.max_iterations,
+        ) {
             return Self::reject(call, RejectionReason::Exhausted);
         }
         let Some(tool) = self.tools.get(&call.tool_id()) else {
@@ -739,10 +792,11 @@ impl<P: ToolPayload> Exchanging<P> {
         Self::authorize(call, tool, false)
     }
 
-    /// The decision for the content of an envelope: a proposed call, or a failure naming what
+    /// The decision for the content of `envelope`: a proposed call, or a failure naming what
     /// arrived instead.
-    async fn proposal(&mut self, payload: P, kind: &str, cause: EventId) -> Result<(), String> {
-        let call = match payload.into_tool_call() {
+    async fn proposal(&mut self, envelope: EventEnvelope<P>) -> Result<(), String> {
+        let (kind, cause, reply) = (envelope.kind, envelope.event_id, envelope.causation_id);
+        let call = match envelope.payload.into_tool_call() {
             Ok(update) if update.call.state() == ToolCallState::Proposed => update.call,
             Ok(update) => {
                 return Err(format!(
@@ -757,7 +811,7 @@ impl<P: ToolPayload> Exchanging<P> {
                 ));
             }
         };
-        let decision = self.decide(&call)?;
+        let decision = self.decide(&call, reply)?;
         self.decided(decision, cause).await
     }
 
@@ -804,8 +858,7 @@ impl<P: ToolPayload> Exchanging<P> {
                     Some(_) => {}
                     None if interrupts(&envelope.kind) => self.interruption(envelope).await?,
                     None => {
-                        self.proposal(envelope.payload, &envelope.kind, envelope.event_id)
-                            .await?;
+                        self.proposal(envelope).await?;
                     }
                 },
                 Next::Closed => input_ended = true,
@@ -864,7 +917,7 @@ impl<P: ToolPayload> NodeImplementation<P> for ToolAuthority {
                     state: Arc::clone(&self.state),
                     calls: self.calls.clone(),
                     interrupted: HashSet::new(),
-                    iterations: HashMap::new(),
+                    iterations: Iterations::default(),
                     input: input.endpoint,
                     output: sending(output),
                     rejected: rejected.map(sending),
@@ -1174,17 +1227,19 @@ fn admits(schema: &Json, value: &Json) -> bool {
 #[cfg(test)]
 mod tests {
     use std::future::{self, Future};
+    use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
     use inference_core::endpoint::{EndpointFuture, OutputEndpoint, SendError};
     use inference_core::envelope::{EventEnvelope, EventId, Timebase};
-    use inference_core::id::{NodeId, RunId, StreamId};
+    use inference_core::id::{GenerationId, NodeId, RunId, StreamId};
+    use inference_text::SpanId;
     use serde_json::json;
 
     use super::super::Watched;
-    use super::{admits, send_unless, supported};
+    use super::{Iterations, admits, send_unless, supported};
 
     /// An edge that takes an envelope on the second poll of its send: the first finds it full.
     #[derive(Default)]
@@ -1532,5 +1587,73 @@ mod tests {
             "a bound inside a property"
         );
         assert!(supported(&json!({"maximum": null})).is_err());
+    }
+
+    /// The iteration rule of the cases below: four times round the loop.
+    const FOUR: Option<NonZeroUsize> = NonZeroUsize::new(4);
+
+    /// The calls of one reply, which name the same triggering event and rest on the same span,
+    /// count once; the fifth reply on one span is past the rule, and the rest of its calls with
+    /// it; a reply already admitted stays admitted; the next input, the next span, is counted
+    /// anew, and so is another generation.
+    #[test]
+    fn the_calls_of_one_reply_count_once_and_each_input_is_counted_anew() {
+        let mut iterations = Iterations::default();
+        let generation = GenerationId::generate();
+        let input = SpanId::generate();
+        let replies: Vec<EventId> = (0..5).map(|_| EventId::generate()).collect();
+        for (index, reply) in replies[..4].iter().enumerate() {
+            for call in 0..3 {
+                assert!(
+                    iterations.admits(generation, input, Some(*reply), FOUR),
+                    "call {call} of reply {index}"
+                );
+            }
+        }
+        for call in 0..2 {
+            assert!(
+                !iterations.admits(generation, input, Some(replies[4]), FOUR),
+                "call {call} of the fifth reply"
+            );
+        }
+        assert!(iterations.admits(generation, input, Some(replies[3]), FOUR));
+        for _ in 0..4 {
+            let reply = Some(EventId::generate());
+            assert!(iterations.admits(generation, SpanId::generate(), reply, FOUR));
+        }
+        let next = SpanId::generate();
+        for _ in 0..4 {
+            assert!(iterations.admits(generation, next, Some(EventId::generate()), FOUR));
+        }
+        assert!(!iterations.admits(generation, next, Some(EventId::generate()), FOUR));
+        let other = GenerationId::generate();
+        assert!(iterations.admits(other, input, Some(EventId::generate()), FOUR));
+    }
+
+    /// A proposal that names no triggering event goes round by itself, and its generation is
+    /// counted as one input whatever span the proposal rests on; the two kinds are counted
+    /// apart.
+    #[test]
+    fn a_proposal_naming_no_triggering_event_counts_singly_per_generation() {
+        let mut iterations = Iterations::default();
+        let generation = GenerationId::generate();
+        for _ in 0..4 {
+            assert!(iterations.admits(generation, SpanId::generate(), None, FOUR));
+        }
+        assert!(!iterations.admits(generation, SpanId::generate(), None, FOUR));
+        let input = SpanId::generate();
+        assert!(iterations.admits(generation, input, Some(EventId::generate()), FOUR));
+        assert!(iterations.admits(GenerationId::generate(), input, None, FOUR));
+    }
+
+    /// Without a rule every proposal is admitted, of either kind.
+    #[test]
+    fn without_a_rule_every_proposal_is_admitted() {
+        let mut iterations = Iterations::default();
+        let (generation, input) = (GenerationId::generate(), SpanId::generate());
+        for _ in 0..64 {
+            assert!(iterations.admits(generation, input, None, None));
+            assert!(iterations.admits(generation, input, Some(EventId::generate()), None));
+        }
     }
 }

@@ -276,8 +276,20 @@ impl Agent {
         host: impl AudioHost,
         stop: impl Future + Send,
     ) -> Result<()> {
-        let speaker = Speaker::open(&host, &DeviceSelector::Default, PlayoutConfig::default())
-            .map_err(|error| device(&host, Direction::Output, &error))?;
+        self.play_during(&host, self.feed_until(&host, stop)).await
+    }
+
+    /// Plays the agent's audio on `host`'s default speaker while `body` runs, and opens no
+    /// microphone: `body` gives the session its input and returns once the session has taken the
+    /// last of it or has ended. After an `Ok` from `body` this returns once the playout thread
+    /// handed out the last frame and the speaker played what it holds; after an `Err`, at once.
+    pub(crate) async fn play_during(
+        &self,
+        host: &impl AudioHost,
+        body: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
+        let speaker = Speaker::open(host, &DeviceSelector::Default, PlayoutConfig::default())
+            .map_err(|error| device(host, Direction::Output, &error))?;
         let speaker = Arc::new(speaker);
         let (sink, drained) = Sink::start(Arc::clone(&speaker));
         let counts = Arc::clone(&sink.counts);
@@ -290,7 +302,7 @@ impl Agent {
             sink: Arc::clone(&sink),
             ended: false,
         };
-        let outcome = self.feed_until(&host, stop).await;
+        let outcome = body.await;
         if outcome.is_ok() {
             sink.end();
             let _ = drained.await;

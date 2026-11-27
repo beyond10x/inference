@@ -430,7 +430,21 @@ entities:
 
   # A feedback loop declaration with its bounded control rule: the edge it names is the feedback
   # edge, and `max_iterations` is its iteration rule, how many times one generation may go round
-  # the loop along that edge before the loop terminates; the edge's capacity is its queue bound.
+  # the loop along that edge for one input before the loop terminates; the edge's capacity is its
+  # queue bound.
+  # What goes round once, and what an input is, the envelopes on the edge say. On a loop of tool
+  # calls the edge carries proposals. The proposals of one generation whose envelopes name the
+  # same triggering event (`causation_id` of inference.stream.EventEnvelope) and rest on the same
+  # span are the calls one reply of the generation ends with: they go round together and count
+  # once. Their input is the span they rest on (`basis_span_id` of inference.tools.ToolCall), so
+  # a generation that answers several inputs one after another, as a text model's one generation
+  # of a run answers each committed text of a conversation, is counted anew for each of them. A
+  # proposal whose envelope names no triggering event says neither: it goes round by itself, and
+  # its generation is counted as answering one input, whatever span the proposal rests on; the
+  # two kinds are counted apart. An interruption starts no new input: it supersedes or cancels
+  # the generation (inference.stream.Generation), and a generation that follows is counted anew.
+  # A proposal past the rule is rejected `exhausted` (inference.tools.RejectionReason), and the
+  # other proposals of its reply with it.
   # A cycle that runs through such an edge is bounded; every other cycle is invalid.
   # read from: docs/design/inference.md:517
   # read from: docs/design/inference.md:529

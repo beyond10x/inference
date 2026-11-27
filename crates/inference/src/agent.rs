@@ -26,15 +26,16 @@ use inference_pipeline::nodes::AuthorityHandle;
 use inference_pipeline::nodes::duplex::CallIds;
 use inference_pipeline::nodes::log::StreamEvent;
 use inference_runtime::RunError;
-use inference_text::{OutputSegment, SpanId};
+use inference_text::{OutputSegment, SegmentId, SpanId};
 use inference_tools::{
-    CancellationSignal, ExecutionFuture, IntoTool, Tool, ToolCall, ToolCallId, ToolExecutor, ToolId,
+    CancellationSignal, ExecutionFuture, IntoTool, Tool, ToolCall, ToolCallId, ToolCallProposed,
+    ToolExecutor, ToolId,
 };
 use tokio::sync::{Notify, broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::event::{Event, Events, Item};
-use crate::recipe::{SwitchFailed, TextIngress};
+use crate::recipe::{Proposed, SwitchFailed, TextIngress};
 use crate::stack::{Bound, default_session_config, role};
 use crate::{BindingSource, Env, Error, Instantiation, Payload, Recipe, Result, Role, Stack};
 
@@ -238,6 +239,8 @@ struct Core {
     route: Arc<Route>,
     authority: Option<AuthorityHandle>,
     call_ids: Option<CallIds>,
+    /// The calls the run told its session, with their arguments.
+    proposed: Option<Proposed>,
     names: Vec<(ToolId, String)>,
     confirmations: Mutex<Confirmations>,
 }
@@ -253,6 +256,7 @@ impl Core {
             route,
             authority: None,
             call_ids: None,
+            proposed: None,
             names: Vec::new(),
             confirmations: Mutex::default(),
         }
@@ -299,6 +303,45 @@ impl Core {
             .into_iter()
             .chain(authority.calls())
             .find(|call| call.call_id() == call_id)
+    }
+
+    /// Yields `ToolCalled` for the call `proposed`, once: nothing for a call it was yielded for.
+    fn tool_called(
+        &self,
+        proposed: ToolCallProposed,
+        arguments: serde_json::Value,
+        raw: SessionEvent,
+    ) {
+        if !lock(&self.confirmations).called.insert(proposed.call_id) {
+            return;
+        }
+        self.route.send(Event::ToolCalled {
+            name: self.name_of(proposed.tool_id),
+            arguments,
+            call_id: proposed.call_id,
+            speech_call_id: self
+                .call_ids
+                .as_ref()
+                .and_then(|ids| ids.speech_call_id(proposed.call_id)),
+            raw,
+        });
+    }
+
+    /// Yields `ToolCalled` for each call the run told before it sent the part of the text
+    /// segment `segment_id` the pump has just read, and whose own event the pump has not read
+    /// yet: a call is yielded before the text its model wrote after it. `whole` says the part
+    /// is the segment's commit.
+    fn tell_calls_before(&self, segment_id: SegmentId, whole: bool) {
+        let Some(told) = self.proposed.as_ref() else {
+            return;
+        };
+        for (proposed, arguments) in told.take_before(segment_id, whole) {
+            self.tool_called(
+                proposed,
+                arguments,
+                SessionEvent::ToolCallProposed(proposed),
+            );
+        }
     }
 
     /// The pump's look at the authority's held calls: with the agent `Open`, one
@@ -388,6 +431,13 @@ impl Step {
         let mut act = Act::default();
         let old = self.left.is_some();
         let route = &core.route;
+        match &event {
+            SessionEvent::TextDelta(delta) => core.tell_calls_before(delta.segment_id, false),
+            SessionEvent::TextSegmentCommitted(said) => {
+                core.tell_calls_before(said.segment_id, true);
+            }
+            _ => {}
+        }
         match &event {
             SessionEvent::SessionReady(_) => {
                 if !core.started.swap(true, Ordering::AcqRel) {
@@ -480,20 +530,19 @@ impl Step {
                 }
             }
             SessionEvent::ToolCallProposed(proposed) => {
-                lock(&core.confirmations).called.insert(proposed.call_id);
+                // The run kept the call as it sent this event; the authority's record, which
+                // may not hold the call yet, answers only for a run that kept none. A call the
+                // pump told ahead of a text that followed it is not told again.
                 let arguments = core
-                    .call(proposed.call_id)
-                    .map_or(serde_json::Value::Null, |call| call.arguments().clone());
-                route.send(Event::ToolCalled {
-                    name: core.name_of(proposed.tool_id),
-                    arguments,
-                    call_id: proposed.call_id,
-                    speech_call_id: core
-                        .call_ids
-                        .as_ref()
-                        .and_then(|ids| ids.speech_call_id(proposed.call_id)),
-                    raw: event.clone(),
-                });
+                    .proposed
+                    .as_ref()
+                    .and_then(|told| told.take(proposed.call_id))
+                    .or_else(|| {
+                        core.call(proposed.call_id)
+                            .map(|call| call.arguments().clone())
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                core.tool_called(*proposed, arguments, event.clone());
             }
             SessionEvent::UsageRecorded(record) => route.send(Event::Usage(record.clone())),
             SessionEvent::SpeechResponseFailed(failed) => route.send(Event::Error {
@@ -950,6 +999,12 @@ impl AgentBuilder {
     }
 
     /// Gives the agent a tool: a `#[inference::tool]` function or a `(Tool, executor)` pair.
+    ///
+    /// A tool's future is polled on a thread of the run, outside any Tokio runtime, the
+    /// application's included. A tool that needs one holds a `tokio::runtime::Handle`, spawns
+    /// its work onto it and awaits the join handle; a tool that awaits a Tokio timer or socket
+    /// directly panics there, which fails its call with the panic's message: the model is given
+    /// the failure as that call's result.
     #[must_use]
     pub fn tool(mut self, tool: impl IntoTool) -> Self {
         let (tool, executor) = tool.into_tool();
@@ -1060,6 +1115,7 @@ impl AgentBuilder {
         let mut core = Core::new(plan.auto_interrupt, route, Arc::clone(&self.clock));
         core.authority = instantiation.authority().cloned();
         core.call_ids = instantiation.call_ids().cloned();
+        core.proposed = instantiation.proposed().cloned();
         core.names = self
             .given
             .tools
@@ -1199,6 +1255,7 @@ async fn switch(inner: &mut Inner, recipe: Recipe) -> Switched {
             *exclusive(&mut inner.driver) = Some(spawn_driver(driver, Arc::clone(&inner.failure)));
             inner.core.authority = successor.authority().cloned();
             inner.core.call_ids = successor.call_ids().cloned();
+            inner.core.proposed = successor.proposed().cloned();
             successor.recipe().clone_into(&mut inner.settings.recipe);
             inner.instantiation = successor;
             *exclusive(&mut inner.config) = plan.config;
@@ -1514,6 +1571,25 @@ impl Agent {
             .map(|config| config.input_format)
     }
 
+    /// The spans the session's recognition committed so far, in order, over a recipe whose STT
+    /// node is given no turns, as `transcribe`'s; empty over any other.
+    pub(crate) fn spans(&self) -> Vec<inference_text::Span> {
+        self.inner.instantiation.spans()
+    }
+
+    /// A reader of what the session's model node answers from now on, over a recipe whose run
+    /// builds one, as `chat`'s: each text delta, and the end of each reply. None over any other.
+    pub(crate) fn replies(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::recipe::ReplyPart>> {
+        self.inner.instantiation.replies()
+    }
+
+    /// Denies every call the session's tool authority holds for confirmation.
+    pub(crate) fn deny_held(&self) {
+        self.inner.reject_held();
+    }
+
     /// The live session, shared with the agent's pump.
     #[must_use]
     pub fn session(&self) -> &LiveSession<Payload> {
@@ -1548,6 +1624,153 @@ impl Drop for Agent {
         }
         self.inner.core.route.hang_up(None);
     }
+}
+
+/// What the handles `Chat`, `Transcriber` and `Voice` are built on: a resolved stack that shares
+/// the models of the stack the handle was given, the handle's recipe planned over it, and the
+/// agent of the handle's last session.
+pub(crate) struct Handle {
+    stack: Stack,
+    recipe: Recipe,
+    tools: Vec<(Tool, Arc<dyn ToolExecutor>)>,
+    instantiation: Instantiation,
+    description: Description,
+    agent: Option<Agent>,
+}
+
+impl Handle {
+    /// Resolves a copy of `stack` over no environment but its own bindings, as
+    /// [`AgentBuilder::stack`] does, and plans `recipe` over it. No session is opened.
+    pub(crate) fn plan(recipe: Recipe, stack: &Stack) -> Result<Self> {
+        let stack = stack.shared().resolve_with(&Env::new())?;
+        let (instantiation, description) = Self::planned(&recipe, &stack, &[])?;
+        Ok(Self {
+            stack,
+            recipe,
+            tools: Vec::new(),
+            instantiation,
+            description,
+            agent: None,
+        })
+    }
+
+    /// The builder of a session of this handle: its recipe over a stack sharing its models.
+    fn builder(
+        recipe: &Recipe,
+        stack: &Stack,
+        tools: &[(Tool, Arc<dyn ToolExecutor>)],
+    ) -> AgentBuilder {
+        let mut builder = Agent::from_recipe(recipe.clone()).stack(stack.shared());
+        builder.given.tools = tools.to_vec();
+        builder
+    }
+
+    /// What a session of this handle runs, planned as its builder plans it.
+    fn planned(
+        recipe: &Recipe,
+        stack: &Stack,
+        tools: &[(Tool, Arc<dyn ToolExecutor>)],
+    ) -> Result<(Instantiation, Description)> {
+        let builder = Self::builder(recipe, stack, tools);
+        builder.with_stack(|stack| {
+            let plan = builder.plan(stack);
+            let instantiation = plan.recipe.instantiate(stack)?;
+            let description = describe(stack, &instantiation, plan.config);
+            Ok((instantiation, description))
+        })
+    }
+
+    /// Gives the sessions the handle opens from now on `tool` and its executor, and plans the
+    /// handle's recipe again with it; a refused plan leaves the handle as it was.
+    pub(crate) fn give(&mut self, tool: Tool, executor: Box<dyn ToolExecutor>) -> Result<()> {
+        let mut tools = self.tools.clone();
+        tools.push((tool, Arc::from(executor)));
+        let (instantiation, description) = Self::planned(&self.recipe, &self.stack, &tools)?;
+        self.tools = tools;
+        self.instantiation = instantiation;
+        self.description = description;
+        Ok(())
+    }
+
+    /// Opens a new session over the handle's recipe and keeps its agent as the handle's last; the
+    /// agent of the session before it is dropped.
+    pub(crate) async fn open(&mut self) -> Result<&Agent> {
+        let agent = Self::builder(&self.recipe, &self.stack, &self.tools)
+            .start()
+            .await?;
+        Ok(self.agent.insert(agent))
+    }
+
+    /// The agent of the handle's last session; none before the first.
+    pub(crate) const fn agent(&self) -> Option<&Agent> {
+        self.agent.as_ref()
+    }
+
+    /// The live session of the handle's last call; none before the first.
+    pub(crate) fn session(&self) -> Option<&LiveSession<Payload>> {
+        self.agent.as_ref().map(Agent::session)
+    }
+
+    /// The planned pipeline of the handle's last session, or, before the first, the one planned
+    /// when the handle was built.
+    pub(crate) fn pipeline(&self) -> &PlannedPipeline {
+        self.agent
+            .as_ref()
+            .map_or_else(|| self.instantiation.planned(), Agent::pipeline)
+    }
+
+    /// The recipe, bindings and pipeline planned when the handle was built.
+    pub(crate) fn describe(&self) -> Description {
+        self.description.clone()
+    }
+}
+
+/// The error an [`Event::Error`] carries, as one a call can return: an [`Error::Provider`] stays
+/// one, with its adapter and message; any other becomes an [`Error::Layer`] with the same
+/// message. The event's error is the source of either.
+pub(crate) fn failure(error: &Arc<Error>) -> Error {
+    let source: Option<Box<dyn std::error::Error + Send + Sync>> =
+        Some(Box::new(Arc::clone(error)));
+    match error.as_ref() {
+        Error::Provider {
+            adapter, message, ..
+        } => Error::Provider {
+            adapter: adapter.clone(),
+            message: message.clone(),
+            source,
+        },
+        other => Error::Layer {
+            message: other.to_string(),
+            source,
+        },
+    }
+}
+
+/// Reads `events` to their end, giving each to `take`. The first [`Event::Error`] is the error
+/// returned, once the stream has ended; an [`Event::Lagged`] is an [`Error::Layer`], since the
+/// call would return less than the session produced.
+pub(crate) async fn read_to_end(mut events: Events, mut take: impl FnMut(Event)) -> Result<()> {
+    use futures_util::StreamExt as _;
+
+    let mut failed = None;
+    while let Some(event) = events.next().await {
+        match event? {
+            Event::Error { error, .. } => {
+                failed.get_or_insert_with(|| failure(&error));
+            }
+            Event::Lagged(missed) => {
+                failed.get_or_insert_with(|| Error::Layer {
+                    message: format!(
+                        "the call fell {missed} events behind its session and cannot return all \
+                         of them"
+                    ),
+                    source: None,
+                });
+            }
+            event => take(event),
+        }
+    }
+    failed.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

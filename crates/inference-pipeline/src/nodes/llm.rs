@@ -52,11 +52,19 @@
 //!   tool call it ended with becomes `inference.tools.ProposeToolCall` of the generation, of the
 //!   tool [`tool_id`] names, resting on the latest span the node generated from: the span of the
 //!   last `TranscriptCommitted`, which that event says is Committed. The proposal is sent on
-//!   `tool_call` and the generation awaits its outcome. A call naming a tool the node was not
-//!   given is dropped: the node answers it at once as rejected `denied`, as `llm` requires every
-//!   call of a round answered before the next turn, and the generation continues without it. The
-//!   node generates from committed spans only, so the provisional-input barrier never bars its
-//!   proposals; a proposal the state machine refuses all the same fails the node;
+//!   `tool_call` and the generation awaits its outcome. Its envelope names as its triggering
+//!   event (`causation_id`) the event the reply answers, the envelope of the input or of the
+//!   outcome that completed the round before it, so the calls of one reply name the same event
+//!   and the tool authority counts them as one time round the loop. Given a round bound
+//!   ([`ModelNode::with_round_bound`]), a reply that ends with more calls to send than the bound
+//!   fails the node with an error naming the bound, and none of them is sent: the node lets its
+//!   input edges go and passes the end of input on, on `tool_call` alone, so that the loop's
+//!   other nodes, passing it on to `tool_result`, find the node gone, as the run's drive loop
+//!   then does. A call naming a tool the node was not given is dropped: the node answers it at
+//!   once as rejected `denied`, as `llm` requires every call of a round answered before the next
+//!   turn, and the generation continues without it. The node generates from committed spans
+//!   only, so the provisional-input barrier never bars its proposals; a proposal the state
+//!   machine refuses all the same fails the node;
 //! * one round is awaited at a time: an input arriving while a call is awaited is deferred, and
 //!   answered, in arrival order, once the outcomes are integrated and no call is awaited, so a
 //!   tool result is integrated at the end of the turn that proposed and no outcome is lost to a
@@ -119,6 +127,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -274,6 +283,8 @@ pub struct ModelNode<P> {
     reply: fn(&str) -> String,
     late: Option<String>,
     tools: Option<Tools<P>>,
+    /// The most calls one reply may end with, given one.
+    round_bound: Option<NonZeroUsize>,
     turns: Option<PortId>,
     usage: Option<PortId>,
     log: RunLog,
@@ -290,6 +301,7 @@ impl<P> fmt::Debug for ModelNode<P> {
             .field("generator", &self.generator)
             .field("late", &self.late)
             .field("tools", &self.tools)
+            .field("round_bound", &self.round_bound)
             .field("turns", &self.turns)
             .field("usage", &self.usage)
             .field("node_id", &self.node_id)
@@ -330,6 +342,7 @@ impl<P: ModelPayload> ModelNode<P> {
             reply,
             late: None,
             tools: None,
+            round_bound: None,
             turns: None,
             usage: None,
             log,
@@ -416,6 +429,16 @@ impl<P: ModelPayload + ToolPayload> ModelNode<P> {
         });
         self
     }
+
+    /// The same node, whose reply may end with at most `max` calls it sends, the capacity of the
+    /// edge leaving its port `tool_call`: a reply that ends with more fails the node with an error
+    /// naming `max`, none of its calls is sent, and the loop's other nodes find the node gone;
+    /// see the module documentation.
+    #[must_use]
+    pub const fn with_round_bound(mut self, max: NonZeroUsize) -> Self {
+        self.round_bound = Some(max);
+        self
+    }
 }
 
 /// What a started node takes: its identity, its input edges, its text output edge, given tools,
@@ -481,14 +504,22 @@ struct ToolLoop<P> {
     awaiting: Vec<(ToolCallId, CallId)>,
     /// Whether the loop's iteration rule is exhausted.
     exhausted: bool,
+    /// The event the latest reply answers: the envelope of the input it answers, or of the
+    /// outcome that completed the round it answers.
+    cause: Option<EventId>,
+    /// The most calls one reply may end with, given one.
+    round_bound: Option<NonZeroUsize>,
 }
 
 impl<P: From<ControlKind>> ToolLoop<P> {
-    /// The envelope of `update` on the node's `tool_call` stream, naming the call's generation.
+    /// The envelope of `update` on the node's `tool_call` stream, naming the call's generation
+    /// and, as its triggering event, the event the latest reply answers.
     fn envelope(&mut self, update: ToolCallUpdate) -> EventEnvelope<P> {
         let kind = update.event.name().to_owned();
         let generation_id = Some(update.call.generation_id());
-        self.next(kind, generation_id, (self.wrap)(update))
+        let mut envelope = self.next(kind, generation_id, (self.wrap)(update));
+        envelope.causation_id = self.cause;
+        envelope
     }
 
     /// The end of input on the node's `tool_call` stream.
@@ -600,8 +631,8 @@ struct Exchanging<P> {
     /// Whether an edge arrives at the node's turns port.
     gated: bool,
     /// The inputs that arrived in the turn that is not yet complete, with the stream and sequence
-    /// they arrived on.
-    turn_inputs: VecDeque<(StreamId, i64, TranscriptCommitted)>,
+    /// they arrived on and the event of their envelope.
+    turn_inputs: VecDeque<(StreamId, i64, EventId, TranscriptCommitted)>,
     reply: fn(&str) -> String,
     late: Option<String>,
     signal: Arc<Watched<Signal>>,
@@ -613,8 +644,8 @@ struct Exchanging<P> {
     /// The node's `usage` port, given one with an edge or exposure leaving it.
     usage: Option<UsageOut<P>>,
     /// The inputs that arrived while a call was awaited, with the stream and sequence they
-    /// arrived on, to be answered once it is not.
-    deferred: VecDeque<(StreamId, i64, TranscriptCommitted)>,
+    /// arrived on and the event of their envelope, to be answered once it is not.
+    deferred: VecDeque<(StreamId, i64, EventId, TranscriptCommitted)>,
     /// The text of every input that arrived once the generation was no longer Active.
     dropped: Vec<String>,
     /// Every outcome that arrived once the generation was no longer Active.
@@ -888,39 +919,71 @@ impl<P: ModelPayload> Exchanging<P> {
         else {
             return Ok(());
         };
-        while let Some(proposal) = running.take_proposal() {
-            if tool_loop.exhausted
-                || running.output().generation().state() != GenerationState::Active
-            {
-                continue;
+        loop {
+            let reply: Vec<_> = std::iter::from_fn(|| running.take_proposal()).collect();
+            if reply.is_empty() {
+                return Ok(());
             }
-            let Some(tool) = tool_id(&proposal.name).and_then(|id| tool_loop.tools.get(&id)) else {
-                let denied = ToolOutcome::Rejected(RejectionReason::Denied);
-                running
-                    .integrate(&proposal.call_id, denied.output(), denied.failed())
+            let dropped = tool_loop.exhausted
+                || running.output().generation().state() != GenerationState::Active;
+            let sent = reply
+                .iter()
+                .filter(|proposal| {
+                    tool_id(&proposal.name).is_some_and(|id| tool_loop.tools.contains_key(&id))
+                })
+                .count();
+            if let Some(max) = tool_loop.round_bound
+                && !dropped
+                && sent > max.get()
+            {
+                self.inputs.clear();
+                let end = tool_loop.end();
+                send_unless(
+                    &self.signal,
+                    |signal| signal.cancel,
+                    &Noting(tool_loop.output.as_ref(), &self.closed),
+                    end,
+                )
+                .await?;
+                return Err(format!(
+                    "a reply ended with {sent} tool calls, more than the {max} the edge leaving \
+                     the model's port `tool_call` holds; none of them was sent"
+                ));
+            }
+            for proposal in reply {
+                if tool_loop.exhausted
+                    || running.output().generation().state() != GenerationState::Active
+                {
+                    continue;
+                }
+                let Some(tool) = tool_id(&proposal.name).and_then(|id| tool_loop.tools.get(&id))
+                else {
+                    let denied = ToolOutcome::Rejected(RejectionReason::Denied);
+                    running
+                        .integrate(&proposal.call_id, denied.output(), denied.failed())
+                        .map_err(|refused| refused.to_string())?;
+                    continue;
+                };
+                let basis = tool_loop.basis.as_ref().ok_or_else(|| {
+                    "a proposal was made before any input it could rest on".to_owned()
+                })?;
+                let generation = running.output().generation();
+                let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
                     .map_err(|refused| refused.to_string())?;
-                continue;
-            };
-            let basis = tool_loop.basis.as_ref().ok_or_else(|| {
-                "a proposal was made before any input it could rest on".to_owned()
-            })?;
-            let generation = running.output().generation();
-            let (call, event) = ToolCall::propose(tool, generation, basis, proposal.arguments)
-                .map_err(|refused| refused.to_string())?;
-            tool_loop.awaiting.push((call.call_id(), proposal.call_id));
-            let envelope = tool_loop.envelope(ToolCallUpdate {
-                call,
-                event: ToolCallEvent::Proposed(event),
-            });
-            send_unless(
-                &self.signal,
-                |signal| signal.cancel,
-                &Noting(tool_loop.output.as_ref(), &self.closed),
-                envelope,
-            )
-            .await?;
+                tool_loop.awaiting.push((call.call_id(), proposal.call_id));
+                let envelope = tool_loop.envelope(ToolCallUpdate {
+                    call,
+                    event: ToolCallEvent::Proposed(event),
+                });
+                send_unless(
+                    &self.signal,
+                    |signal| signal.cancel,
+                    &Noting(tool_loop.output.as_ref(), &self.closed),
+                    envelope,
+                )
+                .await?;
+            }
         }
-        Ok(())
     }
 
     /// Runs `inference.stream.SupersedeGeneration` on the generation and sends its
@@ -1018,8 +1081,10 @@ impl<P: ModelPayload> Exchanging<P> {
         Ok(())
     }
 
-    /// Acts on a step of a tool call that arrived on `tool_result`.
-    async fn outcome(&mut self, update: ToolCallUpdate) -> Result<(), String> {
+    /// Acts on a step of a tool call that arrived on `tool_result` in the envelope of the event
+    /// `cause`: the outcome that completes a round triggers the reply that answers it, whose
+    /// proposals name `cause`.
+    async fn outcome(&mut self, update: ToolCallUpdate, cause: EventId) -> Result<(), String> {
         let Some(tool_loop) = self.tool_loop.as_mut() else {
             return Ok(());
         };
@@ -1061,6 +1126,7 @@ impl<P: ModelPayload> Exchanging<P> {
         if !tool_loop.awaiting.is_empty() {
             return Ok(());
         }
+        tool_loop.cause = Some(cause);
         self.requests += 1;
         self.answer().await
     }
@@ -1237,13 +1303,15 @@ impl<P: ModelPayload> Exchanging<P> {
             .is_some_and(|tool_loop| !tool_loop.awaiting.is_empty())
     }
 
-    /// Answers the input `committed`, which arrived on `stream_id` at `sequence`: the generator's
-    /// reply to it, and the proposal that reply ends with. Once the generation is no longer
-    /// Active, the input is dropped and recorded instead.
+    /// Answers the input `committed`, which arrived on `stream_id` at `sequence` in the envelope
+    /// of the event `cause`: the generator's reply to it, and the proposals that reply ends with,
+    /// which name `cause` as their triggering event. Once the generation is no longer Active, the
+    /// input is dropped and recorded instead.
     async fn input(
         &mut self,
         stream_id: StreamId,
         sequence: i64,
+        cause: EventId,
         committed: TranscriptCommitted,
     ) -> Result<(), String> {
         if !self.active() || self.interruption_asked() {
@@ -1251,6 +1319,9 @@ impl<P: ModelPayload> Exchanging<P> {
             return Ok(());
         }
         self.generating_from(stream_id, sequence, &committed)?;
+        if let Some(tool_loop) = self.tool_loop.as_mut() {
+            tool_loop.cause = Some(cause);
+        }
         self.generation
             .as_mut()
             .ok_or_else(|| "the generation was checked Active".to_owned())?
@@ -1264,10 +1335,10 @@ impl<P: ModelPayload> Exchanging<P> {
     /// awaits a call again.
     async fn deferred(&mut self) -> Result<(), String> {
         while !self.awaiting() {
-            let Some((stream_id, sequence, committed)) = self.deferred.pop_front() else {
+            let Some((stream_id, sequence, cause, committed)) = self.deferred.pop_front() else {
                 break;
             };
-            self.input(stream_id, sequence, committed).await?;
+            self.input(stream_id, sequence, cause, committed).await?;
         }
         Ok(())
     }
@@ -1291,7 +1362,8 @@ impl<P: ModelPayload> Exchanging<P> {
             self.input_closed = true;
             return Ok(());
         };
-        let (stream_id, sequence) = (envelope.stream_id, envelope.sequence);
+        let (stream_id, sequence, cause) =
+            (envelope.stream_id, envelope.sequence, envelope.event_id);
         match envelope.payload.carried() {
             Carried::Control(ControlKind::Stop) => {
                 self.inputs[index].ended = true;
@@ -1299,11 +1371,13 @@ impl<P: ModelPayload> Exchanging<P> {
             }
             Carried::Stream(StreamEvent::TranscriptCommitted(committed)) if !self.input_ended => {
                 if self.gated {
-                    self.turn_inputs.push_back((stream_id, sequence, committed));
+                    self.turn_inputs
+                        .push_back((stream_id, sequence, cause, committed));
                 } else if self.awaiting() {
-                    self.deferred.push_back((stream_id, sequence, committed));
+                    self.deferred
+                        .push_back((stream_id, sequence, cause, committed));
                 } else {
-                    self.input(stream_id, sequence, committed).await?;
+                    self.input(stream_id, sequence, cause, committed).await?;
                 }
             }
             Carried::Stream(_) | Carried::Tool(_) | Carried::Usage(_) | Carried::Control(_) => {}
@@ -1325,9 +1399,10 @@ impl<P: ModelPayload> Exchanging<P> {
             self.inputs[index].ended = true;
             return Ok(());
         };
+        let cause = envelope.event_id;
         match (port, envelope.payload.carried()) {
             (_, Carried::Control(ControlKind::Stop)) => self.inputs[index].ended = true,
-            (Arrives::ToolResult, Carried::Tool(update)) => self.outcome(update).await?,
+            (Arrives::ToolResult, Carried::Tool(update)) => self.outcome(update, cause).await?,
             (Arrives::Turns, Carried::Stream(StreamEvent::TurnCompleted(_))) => {
                 self.turn_completed().await?;
             }
@@ -1348,8 +1423,11 @@ impl<P: ModelPayload> Exchanging<P> {
                 && self.turns_ended()
                 && !ended
             {
-                self.dropped
-                    .extend(self.turn_inputs.drain(..).map(|(_, _, input)| input.text));
+                self.dropped.extend(
+                    self.turn_inputs
+                        .drain(..)
+                        .map(|(_, _, _, input)| input.text),
+                );
                 self.complete().await?;
                 self.end().await?;
                 ended = true;
@@ -1579,6 +1657,8 @@ impl<P: ModelPayload> NodeImplementation<P> for ModelNode<P> {
                         basis: None,
                         awaiting: Vec::new(),
                         exhausted: false,
+                        cause: None,
+                        round_bound: self.round_bound,
                     }),
                     _ => None,
                 };
