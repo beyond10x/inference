@@ -93,10 +93,19 @@ b10x-gates scan-text --policy <file> <path>...           # release and pull-requ
   (approval-record:sherpa-tts-gpl-phonemiser): espeak-ng (GPL-3.0) is admitted for
   `inference-sherpa-onnx-tts` alone, only inside the sherpa-onnx native library built with TTS and
   the `espeak-ng-data` a voice carries, never committed or distributed here, and recorded as a
-  code-licence entry of its own. Each checkpoint's licence, source URL and hash go in the
-  adapter's capability record at adoption; any other licence needs the owner's word for that
-  checkpoint. Tests download no weights and start no model server: a test that needs one reads
-  its path or URL from an environment variable and is ignored without it.
+  code-licence entry of its own. By the owner's decision of 2026-11-27 the libraries built into
+  the upstream sherpa-onnx and onnxruntime archives that the user's build fetches are admitted
+  under these licences as well, only as built into those archives, never committed or
+  distributed here: Eigen (MPL-2.0), in both archives and so for both sherpa-onnx adapters;
+  ucd-tools (GPL-3.0-or-later), a directory of the espeak-ng sources in the archive built with
+  TTS, read as part of the espeak-ng exception, same crate and same conditions; and the pieces of
+  the toolchain, the GCC runtime (GPL-3.0-or-later WITH GCC-exception-3.1) and the static pieces
+  of glibc (LGPL-2.1-or-later), under their runtime and linking exceptions. Each is recorded as a
+  code-licence entry of its own. Every other licence of backend code needs the owner's word. Each
+  checkpoint's licence, source URL and hash go in the adapter's capability record at adoption;
+  any other licence needs the owner's word for that checkpoint. Tests download no weights and
+  start no model server: a test that needs one reads its path or URL from an environment
+  variable and is ignored without it.
 - A live test that talks to a hosted provider is ignored, behind feature `live`, and its ignore
   reason contains the word `billed`.
 - Every `#[ignore]` gives a reason of one of five kinds. The test
